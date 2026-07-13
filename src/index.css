@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body { 
+    @apply bg-white text-nlg-text text-[14px];
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; 
+  }
+}
+
+@layer utilities {
+  .fade-in { animation: fadeIn .25s ease; }
+  .toast { animation: slideIn .25s ease, fadeOut .25s ease 2.6s forwards; }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #DFE1E6; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.nav-item.active { background: #E8F0FE; color: #1A73E8; font-weight: 600; }
+.nav-item.active svg { stroke: #1A73E8; }
+
+@keyframes fadeIn { 
+  from { opacity:0; transform: translateY(4px);} 
+  to { opacity:1; transform: translateY(0);} 
+}
+
+@keyframes slideIn { 
+  from {opacity:0; transform: translateX(20px);} 
+  to {opacity:1; transform: translateX(0);} 
+}
+
+@keyframes fadeOut { 
+  to {opacity:0;} 
+}
+
+[data-tree-toggle] svg { transition: transform .15s ease; }
+.tree-collapsed [data-tree-toggle] svg { transform: rotate(-90deg); }
+.tree-collapsed > .tree-children { display:none; }
+
+/* ── Theme table header classes (dikontrol oleh applyTableTheme via CSS vars) ── */
+:root {
+  --th1: #172B4D;
+  --th2: #1e3561;
+  --th-text: #ffffff;
+  --tpast: #2d3f5e;
+  --ttotal: #0f1f38;
+  --tytd: #1a4d3a;
+}
+
+.th1  { background-color: var(--th1, #172B4D) !important; color: var(--th-text, #fff) !important; }
+.th2  { background-color: var(--th2, #1e3561) !important; color: var(--th-text, #fff) !important; }
+.tpast{ background-color: var(--tpast, #2d3f5e) !important; color: var(--th-text, #fff) !important; }
+.ttotal{ background-color: var(--ttotal, #0f1f38) !important; color: var(--th-text, #fff) !important; }
+.tytd { background-color: var(--tytd, #1a4d3a) !important; color: #dcfce7 !important; }
+.tbdr { border-color: rgba(255,255,255,0.15) !important; }
+
+@media print {
+  @page { size: A4 landscape; margin: 1cm; }
+  .no-print, #toastContainer, #sidebar, .w-16, #roleBar { display: none !important; }
+  #mainCanvas { padding: 0 !important; max-width: 100% !important; }
+  body { background: white !important; }
+  .overflow-x-auto { overflow: visible !important; }
+  table { page-break-inside: avoid; font-size: 10px; }
+  .th1 { background-color: #172B4D !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bg-green-500, .bg-amber-400, .bg-red-500 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
