@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { MONTH_LABELS, CURRENT_MONTH_IDX, MASTER_DEPT, MASTER_POSITION_BY_DEPT, MASTER_BRANCH, MASTER_LEVEL_KPI } from '../data/mockData';
-import { kpiMonthStats, calcYTD, computeAch, computeScore } from './helpers';
+import { kpiMonthStats, kpiYTDStats } from './helpers';
 
 // ── Export Dashboard KPI (BSC) ke Excel ──
 export function exportDashboardExcel(userMeta, kpis, year) {
@@ -13,7 +13,17 @@ export function exportDashboardExcel(userMeta, kpis, year) {
   rows.push(['Branch', userMeta?.branch || '-', '', 'Level KPI', userMeta?.level || '-']);
   rows.push([]);
 
-  const monthsToShow = CURRENT_MONTH_IDX + 1;
+  // Normalnya cuma s.d. bulan aktif (CURRENT_MONTH_IDX) — tapi kalau ada data Actual di bulan
+  // setelahnya (mis. hasil QA Testing Tools yg sengaja override bulan lain utk simulasi), ikut
+  // ditampilkan supaya export selalu "link" dgn data yg sedang diuji, konsisten dgn `activeMonths`
+  // di Dashboard.jsx (root cause temuan user 2026-07-20: export cuma Jan-Feb walau data QA s.d. Jun).
+  let maxDataMonth = CURRENT_MONTH_IDX;
+  kpis.forEach((k) => {
+    for (let i = 11; i > maxDataMonth; i--) {
+      if (k.factor1[i] !== null && k.factor1[i] !== undefined) { maxDataMonth = i; break; }
+    }
+  });
+  const monthsToShow = maxDataMonth + 1;
   const header = ['Perspektif', 'KPI', 'Type', 'UoM', 'Periode', 'Weight', 'Target'];
   for (let m = 0; m < monthsToShow; m++) {
     header.push(`${MONTH_LABELS[m]} Actual`, `${MONTH_LABELS[m]} Ach%`, `${MONTH_LABELS[m]} Score`);
@@ -31,10 +41,17 @@ export function exportDashboardExcel(userMeta, kpis, year) {
         row.push('-', '-', '-');
       }
     }
-    const ytd = calcYTD(k, CURRENT_MONTH_IDX);
-    const ytdAch = computeAch(k.type, k.target, ytd);
-    const ytdScore = computeScore(ytdAch, k.type);
-    row.push((ytdAch * 100).toFixed(0) + '%', ytdScore);
+    // "KPI punya data YTD?" sekarang dipusatkan di `kpiYTDStats` (helpers.js) — sebelumnya logika ini
+    // di-inline di sini sendiri (fix pertama utk bug "9V 9R" nongol 0%/Score1, 2026-07-20), tapi 5
+    // halaman lain (Dashboard/Team/Executive/ActualInput) re-implement sendiri2 tanpa guard ini, jadi
+    // Export Excel (benar) & tampilan on-screen (salah) mulai berbeda utk KPI yg sama — laporan user
+    // 2026-07-22. Dikonsolidasi ke 1 fungsi bersama supaya tidak terulang lagi.
+    const ytdStats = kpiYTDStats(k, maxDataMonth);
+    if (ytdStats) {
+      row.push((ytdStats.ach * 100).toFixed(0) + '%', ytdStats.score);
+    } else {
+      row.push('-', '-');
+    }
     rows.push(row);
   });
 

@@ -11,12 +11,26 @@ const PERSP_COLORS = {
   'Learning & Growth': 'bg-teal-100 text-teal-700',
 };
 const TYPE_COLORS = { Max: 'bg-green-100 text-green-700', Min: 'bg-red-100 text-red-700' };
+// Aksen kartu KPI di Cascade & Alignment Tree — 1 warna per perspektif, senada dgn PERSP_COLORS.
+const PERSP_BORDER = {
+  Financial: 'border-l-purple-500',
+  Customer: 'border-l-blue-500',
+  'Internal Process': 'border-l-orange-500',
+  'Learning & Growth': 'border-l-teal-500',
+};
+const PERSP_TEXT = {
+  Financial: 'text-purple-700',
+  Customer: 'text-blue-700',
+  'Internal Process': 'text-orange-700',
+  'Learning & Growth': 'text-teal-700',
+};
 const statusPill = (st) => st === 'Active' ? 'bg-green-100 text-green-700' : st === 'Locked' ? 'bg-nlg-text text-white' : 'bg-gray-100 text-nlg-text-muted';
 const STATUS_CYCLE = { Draft: 'Active', Active: 'Locked', Locked: 'Draft' };
 
 export const KPIBuilder = () => {
-  const { sos, uoms, kpis, addKPI, updateKPI, deleteKPI, users, userKPIs } = useKPIContext();
+  const { sos, uoms, kpis, addKPI, updateKPI, deleteKPI, users, userKPIs, updateUserKPI, dismissedMandatory } = useKPIContext();
   const toast = useToast();
+  const [viewMode, setViewMode] = useState('template'); // 'template' | 'registry'
   const [selectedNode, setSelectedNode] = useState('company');
   const [expandedNodes, setExpandedNodes] = useState({ company: true });
   // Korelasi KPI Company → performa aktual tiap instance Dept yg meng-cascade-nya (via `sourceKpiId`,
@@ -33,13 +47,67 @@ export const KPIBuilder = () => {
     return { dept, instances };
   });
 
+  // ── Registrasi & Label Data Suggest ── Sec. 8 Project Brief: hanya KPI User yang statusnya sudah
+  // Approved/Locked (mandatory maupun ad-hoc) yang masuk daftar ini, dan hanya CS yang bisa memberi
+  // label "Data Suggest" (Planning.jsx/ActualInput.jsx tidak pernah expose kontrol ini ke User).
+  const [regSearch, setRegSearch] = useState('');
+  const [regDeptFilter, setRegDeptFilter] = useState('');
+  const [regExpandedId, setRegExpandedId] = useState(null);
+  const [regForm, setRegForm] = useState(null);
+
+  const registryRows = users.flatMap((u) =>
+    (userKPIs[u.name] || [])
+      .filter((k) => k.status === 'Approved' || k.status === 'Locked')
+      .map((k) => ({ owner: u.name, dept: u.dept, kpi: k }))
+  ).filter((row) => {
+    if (regDeptFilter && row.dept !== regDeptFilter) return false;
+    if (!regSearch.trim()) return true;
+    const q = regSearch.trim().toLowerCase();
+    return row.kpi.name.toLowerCase().includes(q) || row.owner.toLowerCase().includes(q);
+  });
+  const regDepts = [...new Set(users.map((u) => u.dept))].sort();
+
+  // KPI mandatory (`sourceKpiId`) mewarisi template company/dept sbg titik awal isian label — CS tetap
+  // bisa ubah bebas, template cuma pre-fill supaya tidak ngetik ulang nama sumber utk tiap instance dept.
+  const openRegLabel = (row) => {
+    const k = row.kpi;
+    const template = k.sourceKpiId ? kpis.find((t) => t.id === k.sourceKpiId) : null;
+    setRegExpandedId(k.id);
+    setRegForm({
+      enabled: k.dataSuggestionEnabled ?? template?.dataSuggestionEnabled ?? false,
+      sourceLabel: k.dataSourceLabel ?? template?.dataSourceLabel ?? '',
+      integrationKey: k.integrationKey ?? template?.integrationKey ?? '',
+      suggestedFactor1: k.suggestedFactor1 ? [...k.suggestedFactor1] : Array(12).fill(null),
+      suggestedFactor2: k.suggestedFactor2 ? [...k.suggestedFactor2] : Array(12).fill(null),
+    });
+  };
+  const closeRegLabel = () => { setRegExpandedId(null); setRegForm(null); };
+  const setRegMonthValue = (field, i, val) => {
+    const num = val === '' ? null : Number(val);
+    setRegForm((prev) => ({ ...prev, [field]: prev[field].map((v, idx) => (idx === i ? num : v)) }));
+  };
+  const saveRegLabel = (row) => {
+    updateUserKPI(row.owner, row.kpi.id, {
+      dataSuggestionEnabled: regForm.enabled,
+      dataSourceLabel: regForm.sourceLabel.trim(),
+      integrationKey: regForm.integrationKey.trim(),
+      // Nonaktifkan → kosongkan nilai saran (bukan cuma sembunyikan) supaya kolom "Data Suggest" &
+      // validasi "harus sama 2 desimal" di ActualInput.jsx ikut nonaktif total, bukan cuma visual.
+      suggestedFactor1: regForm.enabled ? regForm.suggestedFactor1 : null,
+      suggestedFactor2: regForm.enabled ? regForm.suggestedFactor2 : null,
+    });
+    toast(regForm.enabled ? `Label Data Suggest "${regForm.sourceLabel || '(tanpa nama)'}" disimpan utk ${row.owner}` : 'Data Suggest dinonaktifkan');
+    closeRegLabel();
+  };
+
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
   const defaultForm = {
     persp: 'Financial', so: '', name: '', desc: '', uom: '%', type: 'Max',
     period: 'Bulanan', weight: 10, target: 100, mtdCat: 'RATIO', ytdCat: 'SUM',
-    status: 'Draft', cascade_depts: [],
+    status: 'Draft', cascade_depts: [], factorNote: '',
+    indicatorCategory: '',
   };
   const [formData, setFormData] = useState(defaultForm);
 
@@ -230,6 +298,37 @@ export const KPIBuilder = () => {
   const selectedUserObj = selectedNode.startsWith('user:') ? users.find((u) => u.name === selectedNode.slice(5)) : null;
   const isBODAggregateNode = selectedNode === 'dept:BOD' || selectedUserObj?.level === 'Company';
 
+  // "N KPI terdefinisi" di header node Individual cuma menghitung TEMPLATE (owner_type='user') — hampir
+  // selalu 0 krn KPI Individual biasanya lahir dari cascade mandatory Company/Dept + KPI Tambahan ad-hoc
+  // User sendiri, bukan template per-orang. Panel ini menjawabnya dari sisi REGISTRASI sungguhan
+  // (userKPIs, sama sumber dgn tab Registrasi) supaya node kosong tidak terbaca "orang ini belum py KPI".
+  const selectedUserKPIs = selectedUserObj ? (userKPIs[selectedUserObj.name] || []) : [];
+  const userRegSummary = selectedUserObj ? {
+    total: selectedUserKPIs.length,
+    approved: selectedUserKPIs.filter((k) => k.status === 'Approved' || k.status === 'Locked').length,
+    draft: selectedUserKPIs.filter((k) => k.status === 'Draft').length,
+    submitted: selectedUserKPIs.filter((k) => k.status === 'Submitted').length,
+    mandatory: selectedUserKPIs.filter((k) => k.mandatory).length,
+    performanceIndicator: selectedUserKPIs.filter((k) => !k.mandatory).length,
+    bobotApproved: selectedUserKPIs.filter((k) => k.status === 'Approved' || k.status === 'Locked').reduce((s, k) => s + Number(k.weight || 0) * 100, 0),
+    suggestActive: selectedUserKPIs.filter((k) => k.dataSuggestionEnabled).length,
+  } : null;
+
+  // Cascade & Alignment Tree — permintaan user: node Individual di Kelola Template harusnya
+  // menggambarkan garis cascade Company→Dept→Individual & alignment ke SO, bukan form "+Tambah KPI"
+  // (yg jarang dipakai krn KPI Individual mayoritas lahir dari cascade, bukan dibuat manual per-orang).
+  // 3 sumber sama persis dgn `getMandatoryKPIsFor` (dipakai Planning.jsx) TAPI tanpa filter status
+  // 'Active' — CS perlu lihat Draft juga (User tidak, itu benar & sengaja beda, lihat v6.10).
+  const findInstance = (templateId) => selectedUserKPIs.find((uk) => uk.sourceKpiId === templateId);
+  const companyCascadeKPIs = selectedUserObj
+    ? kpis.filter((k) => k.owner_type === 'company' && (k.cascade_depts || []).includes(selectedUserObj.dept))
+    : [];
+  const deptMandatoryKPIs = selectedUserObj
+    ? kpis.filter((k) => k.owner_type === 'dept' && k.owner_name === selectedUserObj.dept)
+    : [];
+  const individualMandatoryKPIs = nodeKPIs; // owner_type='user', owner_name=orang ini — sudah dihitung di atas
+  const performanceIndicatorKPIs = selectedUserKPIs.filter((k) => !k.mandatory);
+
   const activeCnt = nodeKPIs.filter((k) => k.status === 'Active').length;
   const draftCnt = nodeKPIs.filter((k) => k.status === 'Draft').length;
   const lockedCnt = nodeKPIs.filter((k) => k.status === 'Locked').length;
@@ -246,6 +345,12 @@ export const KPIBuilder = () => {
       <h1 className="text-xl font-bold text-nlg-text mb-1">KPI Setup / Builder</h1>
       <p className="text-sm text-nlg-text-muted mb-5">Definisikan struktur KPI per level. KPI Active akan tampil di Planning form masing-masing User.</p>
 
+      <div className="flex items-center gap-2 mb-4">
+        <button onClick={() => setViewMode('template')} className={`px-3 py-1.5 text-[12px] font-medium rounded-full border transition-colors ${viewMode === 'template' ? 'bg-nlg-primary text-white border-nlg-primary' : 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-sidebar'}`}>🗂 Kelola Template</button>
+        <button onClick={() => setViewMode('registry')} className={`px-3 py-1.5 text-[12px] font-medium rounded-full border transition-colors ${viewMode === 'registry' ? 'bg-nlg-primary text-white border-nlg-primary' : 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-sidebar'}`}>✅ Registrasi &amp; Label Data Suggest ({registryRows.length})</button>
+      </div>
+
+      {viewMode === 'template' && (
       <div className="flex flex-col md:flex-row gap-4">
         {/* Org tree */}
         <div className="w-full md:w-56 shrink-0">
@@ -264,10 +369,48 @@ export const KPIBuilder = () => {
               <div className="text-sm font-bold">{nodeLabel}</div>
               <div className="text-[10px] opacity-60">{nodeType} · {nodeKPIs.length} KPI terdefinisi</div>
             </div>
-            {!isFormOpen && !isBODAggregateNode && (
+            {!isFormOpen && !isBODAggregateNode && !selectedUserObj && (
               <button onClick={() => handleOpenForm()} className="px-3 py-1.5 text-xs font-medium rounded border border-white/30 bg-white/10 text-white hover:bg-white/20">+ Tambah KPI</button>
             )}
           </div>
+
+          {selectedUserObj && !isBODAggregateNode && !isFormOpen && (
+            <div className="border border-nlg-border bg-white rounded-nlg-card p-4 mb-4">
+              <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <div className="text-[11px] font-bold text-nlg-text-subdued uppercase tracking-wide">📋 Ringkasan Registrasi KPI — {selectedUserObj.name}</div>
+                <button onClick={() => { setRegSearch(selectedUserObj.name); setViewMode('registry'); }} className="text-[11px] font-medium text-nlg-primary hover:underline">🏷 Kelola Label di Registrasi →</button>
+              </div>
+              {userRegSummary.total === 0 ? (
+                <div className="text-[12px] text-nlg-text-subdued">Belum ada KPI yang disimpan ke Planning oleh {selectedUserObj.name} sama sekali (mandatory maupun KPI Tambahan).</div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+                    <div className="bg-nlg-sidebar rounded-nlg-input px-3 py-2">
+                      <div className="text-[9px] text-nlg-text-subdued uppercase">Approved/Locked</div>
+                      <div className="text-lg font-bold text-green-700">{userRegSummary.approved}<span className="text-[11px] font-normal text-nlg-text-subdued"> / {userRegSummary.total} KPI</span></div>
+                    </div>
+                    <div className="bg-nlg-sidebar rounded-nlg-input px-3 py-2">
+                      <div className="text-[9px] text-nlg-text-subdued uppercase">Belum Final</div>
+                      <div className="text-lg font-bold text-amber-600">{userRegSummary.draft + userRegSummary.submitted}<span className="text-[11px] font-normal text-nlg-text-subdued"> ({userRegSummary.draft} Draft · {userRegSummary.submitted} Submitted)</span></div>
+                    </div>
+                    <div className="bg-nlg-sidebar rounded-nlg-input px-3 py-2">
+                      <div className="text-[9px] text-nlg-text-subdued uppercase">Mandatory vs Performance Indicator</div>
+                      <div className="text-lg font-bold text-nlg-text">{userRegSummary.mandatory}<span className="text-[11px] font-normal text-nlg-text-subdued"> Mandatory · </span>{userRegSummary.performanceIndicator}<span className="text-[11px] font-normal text-nlg-text-subdued"> PI</span></div>
+                    </div>
+                    <div className="bg-nlg-sidebar rounded-nlg-input px-3 py-2">
+                      <div className="text-[9px] text-nlg-text-subdued uppercase">Data Suggest Aktif</div>
+                      <div className="text-lg font-bold text-purple-700">{userRegSummary.suggestActive}<span className="text-[11px] font-normal text-nlg-text-subdued"> / {userRegSummary.approved} Approved</span></div>
+                    </div>
+                  </div>
+                  {userRegSummary.approved > 0 && (
+                    <div className={`text-[11px] ${Math.abs(userRegSummary.bobotApproved - 100) < 0.1 ? 'text-green-700' : 'text-amber-600'}`}>
+                      Total Bobot KPI Approved/Locked: <b>{userRegSummary.bobotApproved.toFixed(0)}%</b> {Math.abs(userRegSummary.bobotApproved - 100) < 0.1 ? '✅' : '⚠️ belum genap 100% — masih ada KPI lain yg belum Approved'}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {isBODAggregateNode && !isFormOpen && (
             <div className="border border-blue-200 bg-blue-50 rounded-nlg-card p-4 mb-4 text-[12px] text-blue-800 flex items-start gap-2">
@@ -332,6 +475,17 @@ export const KPIBuilder = () => {
                       {activeSOs.map((s) => <option key={s.id} value={s.so}>{s.so}</option>)}
                     </select>
                   </div>
+                  {showSOField && (
+                    <div className="col-span-2">
+                      <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">2a. Kategori Indikator <span className="font-normal text-nlg-text-subdued">(opsional)</span></label>
+                      <select value={formData.indicatorCategory} onChange={(e) => setFormData({ ...formData, indicatorCategory: e.target.value })} className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-nlg-primary outline-none">
+                        <option value="">— Belum diklasifikasikan —</option>
+                        <option value="Leading">Leading — indikator proses/prediktif</option>
+                        <option value="Lagging">Lagging — indikator hasil/outcome</option>
+                      </select>
+                      <div className="text-[10px] text-nlg-text-subdued mt-0.5"><b>Leading</b>: mendorong hasil, bisa dipengaruhi jangka pendek (mis. jumlah training, cycle time). <b>Lagging</b>: hasil akhir, baru terlihat setelah beberapa periode (mis. revenue, customer satisfaction). Hanya utk KPI Company/Dept — level Individual tidak diklasifikasikan.</div>
+                    </div>
+                  )}
                   <div className="col-span-2">
                     <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">3. Nama KPI *</label>
                     <input required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="Nama KPI yang terukur..." className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-nlg-primary outline-none" />
@@ -339,6 +493,11 @@ export const KPIBuilder = () => {
                   <div className="col-span-2">
                     <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">4. Deskripsi / Parameter *</label>
                     <textarea required value={formData.desc} onChange={(e) => setFormData({ ...formData, desc: e.target.value })} rows="2" placeholder="Operasional definisi, formula, sumber data..." className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-nlg-primary outline-none resize-none"></textarea>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">4a. Catatan Factor 1/2 <span className="font-normal text-nlg-text-subdued">(opsional)</span></label>
+                    <input value={formData.factorNote} onChange={(e) => setFormData({ ...formData, factorNote: e.target.value })} placeholder="mis. F1 = Individual KPI Tercapai (jumlah) · F2 = Total Eligible Employee (jumlah)" className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-nlg-primary outline-none" />
+                    <div className="text-[10px] text-nlg-text-subdued mt-0.5">Tampil di Input Realisasi User, tepat di titik input F1/F2 — mencegah salah tafsir data yang diinput.</div>
                   </div>
                   <div>
                     <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">5. UoM *</label>
@@ -390,6 +549,13 @@ export const KPIBuilder = () => {
                   </div>
                 </div>
 
+                <div className="border-t border-nlg-border pt-4 mb-4">
+                  <div className="text-[11px] text-purple-700 bg-purple-50 border border-purple-200 rounded-nlg-input px-3 py-2 flex items-start gap-2">
+                    <span className="text-sm leading-none">🔌</span>
+                    <span>Label <b>Data Suggest</b> (sumber &amp; nilai rekomendasi eksternal) tidak lagi diset di sini — kelola per-KPI User yang sudah <b>Approved</b> lewat tab <b>"✅ Registrasi &amp; Label Data Suggest"</b> di atas. Ini mencegah label terpasang di template sebelum KPI-nya benar-benar disetujui, dan sekaligus mencakup KPI Tambahan (ad-hoc) yang tidak punya template sama sekali.</span>
+                  </div>
+                </div>
+
                 {selectedNode === 'company' && (
                   <div className="border-t border-nlg-border pt-4 mb-4">
                     <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -415,7 +581,7 @@ export const KPIBuilder = () => {
             </div>
           )}
 
-          {!isFormOpen && (nodeKPIs.length > 0 ? (
+          {!isFormOpen && !selectedUserObj && (nodeKPIs.length > 0 ? (
             <>
               {/* Kolom dipadatkan (padding lebih kecil, Formula MTD+YTD digabung 1 kolom, min-width
                   diperkecil + truncate+title) supaya tabel 12 kolom ini semaksimal mungkin muat tanpa
@@ -447,6 +613,20 @@ export const KPIBuilder = () => {
                         {showSOField && <td className="px-2 py-2 text-[11px] text-nlg-text-muted max-w-[120px] truncate" title={k.so || ''}>{k.so || '—'}</td>}
                         <td className="px-2 py-2 max-w-[150px]">
                           <div className="font-medium text-[12px] leading-snug">{k.name}</div>
+                          {k.indicatorCategory && (
+                            <div className="mt-1">
+                              <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${k.indicatorCategory === 'Leading' ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
+                                {k.indicatorCategory === 'Leading' ? '⏩' : '🎯'} {k.indicatorCategory}
+                              </span>
+                            </div>
+                          )}
+                          {k.dataSuggestionEnabled && (
+                            <div className="mt-1">
+                              <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700" title={k.integrationKey ? `Kode Integrasi: ${k.integrationKey}` : 'Data Suggestion aktif'}>
+                                🔌 {k.dataSourceLabel || 'Data Suggestion aktif'}
+                              </span>
+                            </div>
+                          )}
                           {k.cascade_depts && k.cascade_depts.length > 0 && (
                             <div className="mt-1">
                               <button
@@ -483,9 +663,19 @@ export const KPIBuilder = () => {
                               🔗 Korelasi "{k.name}" — Company → Dept ({MONTH_LABELS[CURRENT_MONTH_IDX]})
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                              {getCascadeInstances(k).map(({ dept, instances }) => (
+                              {getCascadeInstances(k).map(({ dept, instances }) => {
+                                // Statistik pasif adopsi Fase 1 "Tandai Tidak Relevan" — murni visibilitas
+                                // (bukan gate), jadi bukti objektif kapan cascade_depts ini perlu dipersempit
+                                // atau Fase 2 (kurasi Dept Head) mulai dibutuhkan, bukan berdasar firasat.
+                                const deptUserCount = users.filter((u) => u.dept === dept).length;
+                                const dismissedInDept = users.filter((u) => u.dept === dept && (dismissedMandatory[u.name] || []).includes(k.id)).length;
+                                const untouchedCount = Math.max(0, deptUserCount - instances.length - dismissedInDept);
+                                return (
                                 <div key={dept} className="bg-white border border-blue-100 rounded-nlg-input p-2.5">
                                   <div className="text-[11px] font-bold text-nlg-text mb-1">{dept}</div>
+                                  <div className="text-[9px] text-nlg-text-subdued mb-1.5">
+                                    {instances.length} tersimpan · {dismissedInDept} ditandai tidak relevan · {untouchedCount} belum ditinjau <span className="opacity-70">(dari {deptUserCount} user)</span>
+                                  </div>
                                   {instances.length === 0 ? (
                                     <div className="text-[10px] text-nlg-text-subdued italic">Belum ada User di dept ini yg "Simpan ke Planning" KPI mandatory ini.</div>
                                   ) : (
@@ -507,7 +697,8 @@ export const KPIBuilder = () => {
                                     </div>
                                   )}
                                 </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           </td>
                         </tr>
@@ -532,7 +723,101 @@ export const KPIBuilder = () => {
             </div>
           ))}
 
-          {!isFormOpen && (
+          {/* Cascade & Alignment Tree — diagram kotak+garis (permintaan user 2026-07-22, contoh awal
+              di-preview lewat Artifact terpisah pakai data nyata Indri sblm dibangun di sini). Beda dari
+              versi list v6.38: sekarang box-and-line spt org chart, data tetap 100% live dari `kpis`/
+              `userKPIs` (bukan hardcode spt di Artifact). Connector pure-CSS ada di index.css
+              (`.cascade-tree`), krn Tailwind tidak bisa ekspresikan ::before/::after connector garis. */}
+          {!isFormOpen && selectedUserObj && !isBODAggregateNode && (() => {
+            const leafNode = (k, inst, st, grade) => (
+              <li key={k.id}>
+                <div className={`node-box text-left w-[210px] bg-white border-l-4 ${PERSP_BORDER[k.persp] || 'border-l-gray-300'} border-y border-r border-nlg-border rounded-nlg-input px-3 py-2`}>
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <span className={`text-[9px] font-bold uppercase tracking-wide ${PERSP_TEXT[k.persp] || 'text-nlg-text-muted'}`}>{k.persp}</span>
+                    {k.so && <span className="text-[9px] text-nlg-text-subdued">· 🎯 {k.so}</span>}
+                  </div>
+                  <div className="text-[12px] font-semibold text-nlg-text leading-snug mb-1">{k.name}</div>
+                  {inst ? (
+                    grade ? (
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${grade.cls}`}>{inst.status} · {(st.ach * 100).toFixed(0)}% · {st.score}</span>
+                    ) : (
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-nlg-text-muted">{inst.status} · Belum ada Actual</span>
+                    )
+                  ) : (
+                    <span className="text-[10px] text-amber-700 italic">Belum disimpan ke Planning</span>
+                  )}
+                </div>
+              </li>
+            );
+            const groups = [
+              { key: 'company', label: '🔗 Cascade dari Company', items: companyCascadeKPIs },
+              { key: 'dept', label: `🏬 Mandatory Dept`, items: deptMandatoryKPIs },
+              { key: 'indiv', label: '👤 Mandatory Individual', items: individualMandatoryKPIs },
+              { key: 'pi', label: '🎯 Performance Indicator', items: performanceIndicatorKPIs },
+            ];
+            return (
+              <div>
+                <div className="text-[11px] text-nlg-text-subdued mb-3">🌳 Cascading &amp; Alignment — garis KPI dari Company/Dept sampai ke instance milik <b>{selectedUserObj.name}</b>. Geser ke samping kalau tabnya lebar.</div>
+                <div className="overflow-x-auto border border-nlg-border rounded-nlg-card bg-nlg-sidebar/40 py-6">
+                  <ul className="cascade-tree">
+                    <li>
+                      <div className="node-box inline-block bg-nlg-text text-white rounded-nlg-input px-4 py-2.5">
+                        <div className="text-[9px] uppercase tracking-wide text-white/60">Company</div>
+                        <div className="text-[13px] font-bold">PT Niagamas Lestari Gemilang</div>
+                      </div>
+                      <ul>
+                        <li>
+                          <div className="node-box inline-block bg-nlg-primary-tint border border-nlg-primary rounded-nlg-input px-4 py-2">
+                            <div className="text-[9px] uppercase tracking-wide text-nlg-primary/70">Dept</div>
+                            <div className="text-[13px] font-bold text-nlg-primary">{selectedUserObj.dept}</div>
+                          </div>
+                          <ul>
+                            <li>
+                              <div className="node-box inline-block bg-nlg-primary-tint border-2 border-nlg-primary rounded-nlg-input px-4 py-2 shadow-sm">
+                                <div className="text-[9px] uppercase tracking-wide text-nlg-primary/70">Individual</div>
+                                <div className="text-[13px] font-bold text-nlg-primary">{selectedUserObj.name}</div>
+                                {selectedUserObj.position && <div className="text-[10px] text-nlg-text-muted">{selectedUserObj.position}</div>}
+                              </div>
+                              <ul>
+                                {groups.map((g) => (
+                                  <li key={g.key}>
+                                    <div className="node-box inline-block bg-white border border-dashed border-nlg-border rounded-nlg-input px-3 py-1.5">
+                                      <div className="text-[11px] font-bold text-nlg-text-subdued whitespace-nowrap">{g.label}</div>
+                                      <div className="text-[9px] text-nlg-text-subdued">{g.items.length} KPI</div>
+                                    </div>
+                                    {g.items.length > 0 ? (
+                                      <ul>
+                                        {g.items.map((k) => {
+                                          const inst = g.key === 'pi' ? k : findInstance(k.id);
+                                          const st = inst ? kpiMonthStats(inst, CURRENT_MONTH_IDX) : null;
+                                          const grade = st ? gradeFromScore(st.score) : null;
+                                          return leafNode(k, inst, st, grade);
+                                        })}
+                                      </ul>
+                                    ) : g.key === 'indiv' ? (
+                                      <ul>
+                                        <li>
+                                          <div className="node-box w-[210px]">
+                                            <button onClick={() => handleOpenForm()} className="text-[11px] text-nlg-primary font-medium hover:underline bg-white border border-dashed border-nlg-border rounded-nlg-input px-3 py-2 w-full">+ Tambah KPI Mandatory khusus individu ini</button>
+                                          </div>
+                                        </li>
+                                      </ul>
+                                    ) : null}
+                                  </li>
+                                ))}
+                              </ul>
+                            </li>
+                          </ul>
+                        </li>
+                      </ul>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            );
+          })()}
+
+          {!isFormOpen && !selectedUserObj && (
             <div className="mt-4 bg-nlg-sidebar rounded-nlg-input px-4 py-3 space-y-1 text-[11px] text-nlg-text-muted">
               <div>• <b>Draft</b> — sedang disusun, belum tampil di User Planning form</div>
               <div>• <b>Active</b> — tampil di Planning form User sebagai KPI yang harus diisi target</div>
@@ -543,6 +828,134 @@ export const KPIBuilder = () => {
           )}
         </div>
       </div>
+      )}
+
+      {viewMode === 'registry' && (
+        <div>
+          <div className="text-[11px] text-nlg-text-subdued mb-3">
+            Semua KPI User (mandatory maupun KPI Tambahan/ad-hoc) yang statusnya sudah <b>Approved</b>/<b>Locked</b> — sesuai KPI Planning yang disetujui Superior masing-masing. Hanya CS yang bisa memberi label <b>Data Suggest</b> di sini; User tidak punya kontrol ini di Planning/Input Realisasi.
+          </div>
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <input value={regSearch} onChange={(e) => setRegSearch(e.target.value)} placeholder="Cari nama KPI atau User..." className="border border-nlg-border rounded-nlg-input px-3 py-1.5 text-sm bg-white focus:border-nlg-primary outline-none w-64" />
+            <select value={regDeptFilter} onChange={(e) => setRegDeptFilter(e.target.value)} className="border border-nlg-border rounded-nlg-input px-3 py-1.5 text-sm bg-white focus:border-nlg-primary outline-none">
+              <option value="">Semua Dept</option>
+              {regDepts.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+
+          {registryRows.length === 0 ? (
+            <div className="text-center py-10 border border-dashed border-nlg-border rounded-nlg-card">
+              <div className="text-nlg-text-subdued text-sm mb-1">Belum ada KPI User berstatus Approved/Locked{regSearch || regDeptFilter ? ' yang cocok dgn filter ini' : ''}.</div>
+              {!regSearch && !regDeptFilter && <div className="text-[11px] text-nlg-text-subdued">KPI otomatis muncul di sini begitu Superior meng-approve batch Planning-nya (menu Approval Queue).</div>}
+            </div>
+          ) : (
+            <div className="border border-nlg-border rounded-nlg-card overflow-hidden">
+              <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#172B4D] text-white text-[10px] uppercase">
+                  <tr>
+                    <th className="px-3 py-2 text-left">User</th>
+                    <th className="px-3 py-2 text-left">Dept</th>
+                    <th className="px-3 py-2 text-left min-w-[160px]">KPI</th>
+                    <th className="px-2 py-2 text-center">Sumber</th>
+                    <th className="px-2 py-2 text-center">Status</th>
+                    <th className="px-2 py-2 text-left min-w-[140px]">Label Data Suggest</th>
+                    <th className="px-2 py-2 text-right">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white">
+                  {registryRows.map((row) => {
+                    const k = row.kpi;
+                    const isExpanded = regExpandedId === k.id;
+                    return (
+                      <React.Fragment key={k.id}>
+                        <tr className="border-t border-nlg-border hover:bg-nlg-sidebar/30">
+                          <td className="px-3 py-2 font-medium text-[12px]">{row.owner}</td>
+                          <td className="px-3 py-2 text-[11px] text-nlg-text-muted">{row.dept}</td>
+                          <td className="px-3 py-2">
+                            <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full mr-1.5 ${PERSP_COLORS[k.persp] || 'bg-gray-100'}`}>{k.persp}</span>
+                            <span className="text-[12px] font-medium">{k.name}</span>
+                          </td>
+                          <td className="px-2 py-2 text-center">
+                            <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${k.mandatory ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-nlg-text-muted'}`}>{k.mandatory ? 'Mandatory' : 'Performance Indicator'}</span>
+                          </td>
+                          <td className="px-2 py-2 text-center"><span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${statusPill(k.status)}`}>{k.status}</span></td>
+                          <td className="px-2 py-2">
+                            {k.dataSuggestionEnabled ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700" title={k.integrationKey ? `Kode Integrasi: ${k.integrationKey}` : ''}>🔌 {k.dataSourceLabel || 'Aktif'}</span>
+                            ) : (
+                              <span className="text-[10px] text-nlg-text-subdued">— Belum dilabel</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-2 text-right">
+                            <button onClick={() => (isExpanded ? closeRegLabel() : openRegLabel(row))} className="text-nlg-primary text-[11px] font-medium hover:underline">{isExpanded ? 'Tutup' : '🏷 Kelola Label'}</button>
+                          </td>
+                        </tr>
+                        {isExpanded && regForm && (
+                          <tr>
+                            <td colSpan={7} className="px-3 py-3 bg-purple-50/50 border-t border-purple-100">
+                              <div className="text-[10px] font-bold text-purple-700 uppercase tracking-wide mb-2">🏷 Label Data Suggest — {k.name} ({row.owner})</div>
+                              <label className="flex items-center gap-2 text-[11px] font-bold text-purple-700 cursor-pointer mb-2">
+                                <input type="checkbox" className="accent-purple-600" checked={regForm.enabled} onChange={(e) => setRegForm({ ...regForm, enabled: e.target.checked })} />
+                                Aktifkan Data Suggestion utk KPI instance ini
+                              </label>
+                              {regForm.enabled && (
+                                <>
+                                  <div className="grid grid-cols-2 gap-3 mb-3">
+                                    <div>
+                                      <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">Sumber Data / Sistem Eksternal</label>
+                                      <input value={regForm.sourceLabel} onChange={(e) => setRegForm({ ...regForm, sourceLabel: e.target.value })} placeholder="mis. SAP HCM — Employee Headcount" className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-purple-500 outline-none" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[11px] font-semibold text-nlg-text-muted block mb-1">Kode Integrasi <span className="font-normal text-nlg-text-subdued">(referensi tim IT/API)</span></label>
+                                      <input value={regForm.integrationKey} onChange={(e) => setRegForm({ ...regForm, integrationKey: e.target.value })} placeholder="mis. sap-hcm.headcount.dept-cs" className="w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm bg-white focus:border-purple-500 outline-none" />
+                                    </div>
+                                  </div>
+                                  {k.factorNote && <div className="text-[10px] text-nlg-text-subdued mb-1.5">{k.factorNote}</div>}
+                                  <div className="text-[10px] text-nlg-text-subdued mb-2">Isi nilai hasil "retrieve" dari sistem eksternal per bulan (simulasi — integrasi API sungguhan di luar sistem ini). Nilai ini akan tampil sbg kolom "Data Suggest" di Input Realisasi User, dan User wajib input Actual sama persis (2 desimal) dgn nilai ini.</div>
+                                  <div className="overflow-x-auto border border-purple-200 rounded-nlg-input mb-2">
+                                    <table className="w-full text-[11px]">
+                                      <thead className="bg-purple-100 text-purple-700 uppercase text-[9px]">
+                                        <tr>
+                                          <th className="px-2 py-1.5 text-left">Bulan</th>
+                                          {MONTH_LABELS.map((lbl) => <th key={lbl} className="px-1.5 py-1.5 text-center">{lbl}</th>)}
+                                        </tr>
+                                      </thead>
+                                      <tbody className="bg-white divide-y divide-purple-100">
+                                        <tr>
+                                          <td className="px-2 py-1 font-medium text-nlg-text-muted">Factor 1</td>
+                                          {MONTH_LABELS.map((_, i) => (
+                                            <td key={i} className="px-1 py-1"><input type="number" step="0.01" value={regForm.suggestedFactor1[i] ?? ''} onChange={(e) => setRegMonthValue('suggestedFactor1', i, e.target.value)} className="w-16 border border-nlg-border rounded px-1 py-0.5 text-[11px] text-right focus:border-purple-500 outline-none" /></td>
+                                          ))}
+                                        </tr>
+                                        <tr>
+                                          <td className="px-2 py-1 font-medium text-nlg-text-muted">Factor 2</td>
+                                          {MONTH_LABELS.map((_, i) => (
+                                            <td key={i} className="px-1 py-1"><input type="number" step="0.01" value={regForm.suggestedFactor2[i] ?? ''} onChange={(e) => setRegMonthValue('suggestedFactor2', i, e.target.value)} className="w-16 border border-nlg-border rounded px-1 py-0.5 text-[11px] text-right focus:border-purple-500 outline-none" /></td>
+                                          ))}
+                                        </tr>
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </>
+                              )}
+                              <div className="flex gap-2">
+                                <button onClick={() => saveRegLabel(row)} className="px-4 py-1.5 text-xs rounded-nlg-input bg-nlg-primary text-white font-medium hover:bg-nlg-primary/90">💾 Simpan Label</button>
+                                <button onClick={closeRegLabel} className="px-3 py-1.5 text-xs rounded-nlg-input border border-nlg-border text-nlg-text-muted bg-white hover:bg-nlg-sidebar">Batal</button>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

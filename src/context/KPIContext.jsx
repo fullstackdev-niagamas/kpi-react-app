@@ -30,6 +30,10 @@ export const KPIProvider = ({ children }) => {
   const [kpis, setKpis] = useState(() => loadData('kpi_kpis', initialKPIs));
   const [batches, setBatches] = useState(() => loadData('kpi_batches', initialBatches));
   const [userKPIs, setUserKPIs] = useState(() => loadData('kpi_userKPIs', initialUserKPIs));
+  // KPI Mandatory yang ditandai "Tidak Relevan" oleh Individual di Planning.jsx — { [userName]: [kpiTemplateId] }.
+  // Merujuk ke id template KPI Builder (`kpis`), bukan instance userKPIs (karena KPI yg di-dismiss sengaja
+  // TIDAK dimaterialisasi jadi userKPI). Key baru, tidak perlu naikkan DATA_VERSION (fallback {} aman).
+  const [dismissedMandatory, setDismissedMandatory] = useState(() => loadData('kpi_dismissedMandatory', {}));
 
   // Tandai versi skema setelah data awal termuat, agar migrasi hanya sekali.
   useEffect(() => { localStorage.setItem('kpi_data_version', DATA_VERSION); }, []);
@@ -41,6 +45,7 @@ export const KPIProvider = ({ children }) => {
   useEffect(() => { localStorage.setItem('kpi_kpis', JSON.stringify(kpis)); }, [kpis]);
   useEffect(() => { localStorage.setItem('kpi_batches', JSON.stringify(batches)); }, [batches]);
   useEffect(() => { localStorage.setItem('kpi_userKPIs', JSON.stringify(userKPIs)); }, [userKPIs]);
+  useEffect(() => { localStorage.setItem('kpi_dismissedMandatory', JSON.stringify(dismissedMandatory)); }, [dismissedMandatory]);
 
   // Id generator dengan komponen random — Date.now() saja bisa collide kalau addX() dipanggil
   // berkali-kali secara sinkron dalam satu handler (mis. cascade SO ke banyak Dept sekaligus).
@@ -94,6 +99,59 @@ export const KPIProvider = ({ children }) => {
         seen.add(key);
         return true;
       });
+    });
+
+    // Self-heal (2026-07-17): `factorNote`/`suggestedFactor1`/`suggestedFactor2` ditambahkan ke skema
+    // KPI TANPA menaikkan DATA_VERSION (sengaja — menaikkannya akan mereset SEMUA data localStorage,
+    // termasuk progress testing User yg sedang berjalan, bukan cuma field baru ini). Akibatnya instance
+    // KPI yg sudah kepalang tercache SEBELUM field ini ada (mis. dibuat ulang lewat "Simpan ke Planning"
+    // pas masih versi lama) tidak akan pernah punya field baru itu walau sudah ada di mockData terbaru.
+    // Tambal sekali jalan: cocokkan via `sourceKpiId` (bertahan lintas reset/Draft/Approve, beda dgn
+    // `id` instance yg regenerate tiap kali "Simpan ke Planning") ke seed asli di INITIAL_USER_KPIS,
+    // isi HANYA field yg masih kosong di instance — tidak pernah menimpa data yg User sudah ubah manual.
+    const seedInstances = Object.values(initialUserKPIs).flat();
+    setUserKPIs(prev => {
+      let changed = false;
+      const next = {};
+      Object.entries(prev).forEach(([userName, items]) => {
+        next[userName] = (items || []).map(k => {
+          if (!k.sourceKpiId) return k;
+          const seed = seedInstances.find(sk => sk.sourceKpiId === k.sourceKpiId);
+          const template = initialKPIs.find(sk => sk.id === k.sourceKpiId);
+          const patch = {};
+          if (!k.factorNote && (seed?.factorNote || template?.factorNote)) patch.factorNote = seed?.factorNote || template?.factorNote;
+          if (seed) {
+            if (!k.suggestedFactor1 && seed.suggestedFactor1) patch.suggestedFactor1 = seed.suggestedFactor1;
+            if (!k.suggestedFactor2 && seed.suggestedFactor2) patch.suggestedFactor2 = seed.suggestedFactor2;
+          }
+          if (!k.indicatorCategory && template?.indicatorCategory) patch.indicatorCategory = template.indicatorCategory;
+          if (Object.keys(patch).length === 0) return k;
+          changed = true;
+          return { ...k, ...patch };
+        });
+      });
+      return changed ? next : prev;
+    });
+
+    // Sama halnya utk `kpis` (KPI Builder library, Sec. 4/9) — `factorNote` + tagging integrasi
+    // (`dataSuggestionEnabled`/`dataSourceLabel`/`integrationKey`, ditambahkan 2026-07-17) bisa hilang
+    // di localStorage lama. Match by `id` (stabil, template KPI Builder cuma di-update bukan regenerate).
+    setKpis(prev => {
+      let changed = false;
+      const next = prev.map(k => {
+        const seed = initialKPIs.find(sk => sk.id === k.id);
+        if (!seed) return k;
+        const patch = {};
+        if (!k.factorNote && seed.factorNote) patch.factorNote = seed.factorNote;
+        if (k.dataSuggestionEnabled === undefined && seed.dataSuggestionEnabled) patch.dataSuggestionEnabled = seed.dataSuggestionEnabled;
+        if (!k.dataSourceLabel && seed.dataSourceLabel) patch.dataSourceLabel = seed.dataSourceLabel;
+        if (!k.integrationKey && seed.integrationKey) patch.integrationKey = seed.integrationKey;
+        if (!k.indicatorCategory && seed.indicatorCategory) patch.indicatorCategory = seed.indicatorCategory;
+        if (Object.keys(patch).length === 0) return k;
+        changed = true;
+        return { ...k, ...patch };
+      });
+      return changed ? next : prev;
     });
   }, []);
 
@@ -168,10 +226,55 @@ export const KPIProvider = ({ children }) => {
     ...prev,
     [userName]: (prev[userName] || []).filter(k => k.id !== kpiId),
   }));
+  // Hapus SEMUA KPI (Planning + Actual) milik satu user sekaligus — dipakai QA Testing Tools
+  // (src/config/features.js QA_MODE_ENABLED) utk reset cepat sebelum uji ulang alur dari awal.
+  const resetAllUserKPIs = (userName) => setUserKPIs(prev => ({ ...prev, [userName]: [] }));
+  // Bersihkan HANYA data Actual (factor1/factor2 → 12 bulan null) milik satu user, Planning (weight/
+  // target/formula/status) TIDAK disentuh — dipakai QA Testing Tools utk uji ulang Actual Jan-Des dari
+  // nol tanpa perlu mengulang Planning. Beda dari resetAllUserKPIs yg menghapus KPI sepenuhnya.
+  const resetActualDataOnly = (userName) => setUserKPIs(prev => ({
+    ...prev,
+    [userName]: (prev[userName] || []).map(k => ({
+      ...k,
+      factor1: k.factor1.map(() => null),
+      factor2: k.factor2.map(() => null),
+    })),
+  }));
+  // Hapus field suggestedFactor1/2 (Data Suggestion mock, lihat Project Brief Sec. 6.2 "Data
+  // Suggestion") dari SEMUA KPI milik satu user — dipakai QA Testing Tools saat user ingin uji
+  // kesesuaian formula vs sumber eksternal (mis. Excel) TANPA gangguan kolom saran/validasi
+  // "sama persis dgn suggestion" yg cuma relevan utk alur produksi data automation nantinya.
+  const clearSuggestedData = (userName) => setUserKPIs(prev => ({
+    ...prev,
+    [userName]: (prev[userName] || []).map(({ suggestedFactor1, suggestedFactor2, ...rest }) => rest),
+  }));
+  // Batalkan approval Planning sebelumnya secara MENYELURUH: semua KPI Approved/Locked milik user
+  // ini dikembalikan ke Draft (bisa diedit lagi di Planning.jsx — sama spt tombol "Reset ke Draft"
+  // per-KPI yg sudah ada di ActualInput.jsx, tapi sekaligus semuanya) DAN batch Planning lama user
+  // ini (baik yg sudah Approved maupun masih Pending) dihapus dari Approval Queue/Riwayat Submission,
+  // supaya Superior tidak melihat approval basi begitu User submit ulang dari awal. Batch jenis Actual
+  // sengaja TIDAK disentuh — di luar cakupan "batalkan approval KPI ke Superior" (Planning).
+  const resetApprovedToDraft = (userName) => {
+    setUserKPIs(prev => ({
+      ...prev,
+      [userName]: (prev[userName] || []).map(k => (k.status === 'Approved' || k.status === 'Locked') ? { ...k, status: 'Draft' } : k),
+    }));
+    setBatches(prev => prev.filter(b => !(b.user === userName && b.jenis === 'Planning')));
+  };
   // Submit batch Planning: ubah status sekumpulan KPI milik userName sekaligus (mis. semua Draft → Submitted).
   const submitUserKPIStatus = (userName, kpiIds, newStatus) => setUserKPIs(prev => ({
     ...prev,
     [userName]: (prev[userName] || []).map(k => kpiIds.includes(k.id) ? { ...k, status: newStatus } : k),
+  }));
+
+  // --- KPI Mandatory "Tidak Relevan" (Fase 1) — lihat komentar dismissedMandatory di atas ---
+  const dismissMandatoryKPI = (userName, kpiTemplateId) => setDismissedMandatory(prev => ({
+    ...prev,
+    [userName]: [...new Set([...(prev[userName] || []), kpiTemplateId])],
+  }));
+  const undismissMandatoryKPI = (userName, kpiTemplateId) => setDismissedMandatory(prev => ({
+    ...prev,
+    [userName]: (prev[userName] || []).filter(id => id !== kpiTemplateId),
   }));
 
   return (
@@ -181,7 +284,8 @@ export const KPIProvider = ({ children }) => {
       uoms, addUOM, updateUOM, deleteUOM,
       kpis, addKPI, updateKPI, deleteKPI,
       batches, addBatch, actOnBatch,
-      userKPIs, addUserKPI, updateUserKPI, deleteUserKPI, submitUserKPIStatus,
+      userKPIs, addUserKPI, updateUserKPI, deleteUserKPI, submitUserKPIStatus, resetAllUserKPIs, resetActualDataOnly, clearSuggestedData, resetApprovedToDraft,
+      dismissedMandatory, dismissMandatoryKPI, undismissMandatoryKPI,
     }}>
       {children}
     </KPIContext.Provider>

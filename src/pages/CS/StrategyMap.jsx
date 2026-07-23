@@ -1,6 +1,7 @@
 import { useState, useRef, useLayoutEffect, useCallback } from 'react';
 import { useToast } from '../../context/ToastContext';
 import { useKPIContext } from '../../context/KPIContext';
+import { TrendSparkline } from '../../components/TrendSparkline';
 import {
   ACTIVE_PLAN_YEAR,
   AVAILABLE_YEARS,
@@ -9,7 +10,7 @@ import {
   MASTER_DEPT,
 } from '../../data/mockData';
 import {
-  gradeFromTotal, gradeFromScore, buildDeptAggregates, kpiMonthStats, calcYTD, computeAch, computeScore,
+  gradeFromTotal, gradeFromScore, buildDeptAggregates, deptScoreYTD, kpiMonthStats, calcYTD, computeAch, computeScore,
   PERSP_ORDER, PERSP_META, borderByGrade, bgByGrade, textColorByGrade,
 } from '../../utils/helpers';
 
@@ -25,12 +26,20 @@ export const StrategyMap = ({ isCS = true }) => {
   const [periodMode, setPeriodMode] = useState('mtd'); // 'mtd' | 'ytd'
   const [editMode, setEditMode] = useState(false);
   const [form, setForm] = useState(null); // null = form tertutup
+  const [focusMode, setFocusMode] = useState(false); // true = sembunyikan SO yg sudah "Baik", fokus ke yg perlu perhatian
+  const [detail, setDetail] = useState(null); // SO yg sedang dilihat drill-down read-only (insight CEO)
+  // Ditambahkan (2026-07-21, permintaan user) — sebelumnya Strategy Map terkunci permanen ke
+  // CURRENT_MONTH_IDX (cuma toggle Bulan Berjalan/YTD utk MODE agregasi, bukan pemilihan BULAN).
+  // Sekarang bisa dijelajah per-bulan spt Dashboard Saya/Monitoring Dashboard: klik strip "Bulan:" di
+  // bawah, ATAU klik titik pada trend chart di insight strip / modal detail SO (`onSelectMonth`,
+  // lihat TrendSparkline). Diterapkan menyeluruh (protokol poin B) — lihat juga Executive.jsx.
+  const [viewMonthIdx, setViewMonthIdx] = useState(CURRENT_MONTH_IDX);
 
   const containerRef = useRef(null);
   const cardRefs = useRef({});
   const [linkLines, setLinkLines] = useState([]);
 
-  const m = CURRENT_MONTH_IDX;
+  const m = viewMonthIdx;
 
   // Skor SEKARANG dihitung dari data KPI sungguhan (Sec. 8) — sebelumnya "soDemoScore"/"kpiDemoScore"
   // murni angka acak deterministik dari hash id, TIDAK PERNAH benar2 mencerminkan Actual/Target yg
@@ -42,39 +51,82 @@ export const StrategyMap = ({ isCS = true }) => {
 
   // KPI Approved/Locked sungguhan yg `so`-nya cocok nama SO ini — lintas Dept/User mana pun (1 SO bisa
   // ditarget banyak instance dari Dept berbeda, mis. cascade Company → beberapa Dept — lihat v6.27).
-  const kpisForSO = (soName) => allDepts.flatMap((d) => d.kpis.filter((k) => k.so === soName));
+  // `_dept` ditempel supaya modal drill-down (insight CEO) bisa menampilkan asal Dept tiap KPI kontributor.
+  const kpisForSO = (soName) => allDepts.flatMap((d) => d.kpis.filter((k) => k.so === soName).map((k) => ({ ...k, _dept: d.dept })));
 
-  // Skor YTD per Dept (analog `deptScoreAt` yg sudah ada di helpers.js, tapi versi YTD — belum ada
-  // padanannya di helpers.js krn Executive Dashboard summary cuma menampilkan Company Score MTD).
-  const deptYTDScoreAt = (kpisList) => kpisList.reduce((s, k) => {
-    const st = kpiMonthStats(k, m);
-    if (!st) return s;
-    const ach = computeAch(k.type, k.target, calcYTD(k, m));
-    return s + computeScore(ach, k.type) * k.weight;
-  }, 0);
-
-  // Rata-rata tertimbang score (0-3) utk sekumpulan KPI lintas-dept (mis. kontributor 1 SO) — di-
-  // normalisasi thd total bobot KPI yg py data bulan ini, supaya adil walau bobotnya berasal dari
-  // "kolam 100%" milik User/Dept yg berbeda-beda (bukan cuma dijumlah mentah spt `deptScoreAt`).
-  const weightedAvgScore = (kpisList) => {
-    const withData = kpisList.filter((k) => kpiMonthStats(k, m));
+  // Rata-rata tertimbang score (0-3) utk sekumpulan KPI lintas-dept (mis. kontributor 1 SO) pada bulan
+  // `mi` tertentu — dinormalisasi thd total bobot KPI yg py data bulan itu, supaya adil walau bobotnya
+  // berasal dari "kolam 100%" milik User/Dept yg berbeda-beda (bukan cuma dijumlah mentah spt
+  // `deptScoreAt`). Diparameterisasi dgn `mi`/`mode` eksplisit (bukan cuma bulan aktif via closure)
+  // supaya bisa dipakai ulang utk tren & delta vs-bulan-lalu (insight CEO baru) tanpa duplikasi logika.
+  const scoreAtMonth = (kpisList, mi, mode) => {
+    const withData = kpisList.filter((k) => kpiMonthStats(k, mi));
     if (withData.length === 0) return null;
     const totalW = withData.reduce((s, k) => s + k.weight, 0);
     if (!totalW) return null;
     const sum = withData.reduce((s, k) => {
-      if (periodMode === 'ytd') {
-        const ach = computeAch(k.type, k.target, calcYTD(k, m));
+      if (mode === 'ytd') {
+        const ach = computeAch(k.type, k.target, calcYTD(k, mi));
         return s + computeScore(ach, k.type) * k.weight;
       }
-      return s + kpiMonthStats(k, m).score * k.weight;
+      return s + kpiMonthStats(k, mi).score * k.weight;
     }, 0);
     return sum / totalW;
   };
+  const weightedAvgScore = (kpisList) => scoreAtMonth(kpisList, m, periodMode);
 
-  const companyScoreMTD = allDepts.length ? allDepts.reduce((s, d) => s + d.score, 0) / allDepts.length : 0;
-  const companyScoreYTD = allDepts.length ? allDepts.reduce((s, d) => s + deptYTDScoreAt(d.kpis), 0) / allDepts.length : 0;
+  // Tren s.d. 6 bulan terakhir berakhir di bulan aktif `m`, dan delta vs bulan sebelumnya — dipakai
+  // bersama utk company/perspektif/SO card & modal drill-down supaya angkanya konsisten di semua level.
+  const trailStart = Math.max(0, m - 5);
+  const trailMonths = Array.from({ length: m - trailStart + 1 }, (_, i) => trailStart + i);
+  const trendFor = (kpisList) => trailMonths.map((mi) => {
+    const v = scoreAtMonth(kpisList, mi, periodMode);
+    return { mi, value: v, tooltip: `${MONTH_LABELS[mi]}: ${v !== null ? v.toFixed(2) : 'Belum ada data'}` };
+  });
+  const deltaFromTrend = (trend) => {
+    if (trend.length < 2) return null;
+    const now = trend[trend.length - 1].value;
+    const prev = trend[trend.length - 2].value;
+    return (now !== null && prev !== null) ? now - prev : null;
+  };
+  const renderDelta = (delta) => {
+    if (delta === null || delta === undefined) return null;
+    if (Math.abs(delta) < 0.005) return <span className="text-[9px] font-medium text-nlg-text-subdued">▬ stabil</span>;
+    const up = delta > 0;
+    return <span className={`text-[9px] font-bold ${up ? 'text-green-600' : 'text-red-600'}`}>{up ? '▲' : '▼'} {Math.abs(delta).toFixed(2)}</span>;
+  };
+
+  // Dept dgn score null (belum ada KPI terisi bulan ini) dikeluarkan dari rata2 company — konsisten
+  // dgn prinsip exclude & re-normalize di deptScoreAt/deptScoreYTD sendiri (bukan angka 0 yg menjatuhkan
+  // Company Score secara semu). Sama persis dgn pola di Executive.jsx/Monitoring.jsx supaya 3 halaman
+  // ini selalu identik (root cause bug lama yg dicatat di komentar `allDepts` di atas).
+  const scoredDeptsMTD = allDepts.filter((d) => d.score !== null);
+  const companyScoreMTD = scoredDeptsMTD.length ? scoredDeptsMTD.reduce((s, d) => s + d.score, 0) / scoredDeptsMTD.length : null;
+  const ytdByDept = allDepts.map((d) => deptScoreYTD(d.kpis, m)).filter((s) => s !== null);
+  const companyScoreYTD = ytdByDept.length ? ytdByDept.reduce((s, v) => s + v, 0) / ytdByDept.length : null;
   const companyScore = periodMode === 'ytd' ? companyScoreYTD : companyScoreMTD;
   const companyGrade = gradeFromTotal(companyScore);
+
+  // Company score pada bulan `mi` mana pun (bukan cuma bulan aktif) — dipakai khusus utk tren strip
+  // insight di header, mode-aware (MTD/YTD), logika identik dgn companyScoreMTD/YTD di atas.
+  const companyScoreForMonth = (mi, mode) => {
+    const depts = buildDeptAggregates(users, userKPIs, batches, mi);
+    if (mode === 'ytd') {
+      const vals = depts.map((d) => deptScoreYTD(d.kpis, mi)).filter((v) => v !== null);
+      return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    }
+    const scored = depts.filter((d) => d.score !== null);
+    return scored.length ? scored.reduce((s, d) => s + d.score, 0) / scored.length : null;
+  };
+  const companyTrend = trailMonths.map((mi) => {
+    const v = companyScoreForMonth(mi, periodMode);
+    return { mi, value: v, tooltip: `${MONTH_LABELS[mi]}: ${v !== null ? v.toFixed(2) : 'Belum ada data'}` };
+  });
+  const companyDelta = deltaFromTrend(companyTrend);
+
+  // KPI Merah company-wide bulan aktif — dipakai sbg tombol fokus di insight strip (sama persis definisi
+  // dgn Strategic Risk Radar Executive Dashboard, supaya angkanya tidak divergen antar halaman).
+  const totalRedKPIs = allDepts.reduce((s, d) => s + d.kpis.filter((k) => { const st = kpiMonthStats(k, m); return st && st.score <= 1; }).length, 0);
 
   const openAdd = (persp) => setForm({ ...emptyForm, persp });
   const openEdit = (s) => setForm({ ...emptyForm, ...s, persp: perspOfSO(s), linkedTo: s.linkedTo || [] });
@@ -141,7 +193,7 @@ export const StrategyMap = ({ isCS = true }) => {
     recomputeLinks();
     window.addEventListener('resize', recomputeLinks);
     return () => window.removeEventListener('resize', recomputeLinks);
-  }, [recomputeLinks, editMode, periodMode, viewYear, userKPIs, batches]);
+  }, [recomputeLinks, editMode, periodMode, viewYear, viewMonthIdx, userKPIs, batches]);
 
   const soForPersp = (persp) => sos.filter((s) => s.level === 'Company' && perspOfSO(s) === persp && (editMode || s.active));
   const deptChildCount = (soId) => sos.filter((d) => d.level === 'Dept' && d.parentId === soId).length;
@@ -150,25 +202,50 @@ export const StrategyMap = ({ isCS = true }) => {
   const rootSO = rootCandidates.length === 1 ? rootCandidates[0] : null;
   const financialBandSOs = rootSO ? financialSOs.filter((s) => s.id !== rootSO.id) : financialSOs;
 
+  // Skor per Perspektif dihitung SEKALI di sini (dulu dihitung ulang di dalam renderBand) supaya bisa
+  // dipakai bersama oleh insight strip header (Perspektif Terkuat/Perlu Perhatian) & renderBand — satu
+  // sumber kebenaran, konsisten dgn pola `allDepts`/`weightedAvgScore` di atas.
+  const bandItems = {
+    Financial: financialBandSOs,
+    Customer: soForPersp('Customer'),
+    'Internal Process': soForPersp('Internal Process'),
+    'Learning & Growth': soForPersp('Learning & Growth'),
+  };
+  const perspSummary = PERSP_ORDER.map((persp) => {
+    const kpis = bandItems[persp].flatMap((s) => kpisForSO(s.so));
+    const score = weightedAvgScore(kpis);
+    return { persp, score, grade: gradeFromTotal(score), delta: deltaFromTrend(trendFor(kpis)) };
+  });
+  const scoredPersp = perspSummary.filter((p) => p.score !== null);
+  const strongestPersp = scoredPersp.length ? [...scoredPersp].sort((a, b) => b.score - a.score)[0] : null;
+  const weakestPersp = scoredPersp.length ? [...scoredPersp].sort((a, b) => a.score - b.score)[0] : null;
+  // SO "perlu perhatian" (belum grade "B") — dasar filter Mode Fokus.
+  const soNeedsAttention = (s) => gradeFromTotal(weightedAvgScore(kpisForSO(s.so))).label !== 'B';
+
   const renderSOCard = (s, keyPrefix = '') => {
     const linkedKPIs = kpisForSO(s.so);
     const score = weightedAvgScore(linkedKPIs);
     const grade = score !== null ? gradeFromTotal(score) : null;
+    const delta = deltaFromTrend(trendFor(linkedKPIs));
+    const attention = focusMode && grade && grade.label !== 'B';
     return (
       <div
         key={keyPrefix + s.id}
         ref={(el) => { if (el) cardRefs.current[s.id] = el; }}
-        onClick={editMode ? () => openEdit(s) : undefined}
-        className={`relative rounded-nlg-input border-2 bg-white overflow-hidden transition-shadow w-56 shrink-0 ${editMode ? 'cursor-pointer hover:shadow-md' : ''} ${!s.active ? 'opacity-50' : ''}`}
+        onClick={() => (editMode ? openEdit(s) : setDetail(s))}
+        className={`relative rounded-nlg-input border-2 bg-white overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:-translate-y-0.5 w-56 shrink-0 ${!s.active ? 'opacity-50' : ''} ${attention ? 'ring-2 ring-red-300' : ''}`}
         style={{ borderColor: grade ? borderByGrade(grade.label) : '#E5E7EB', zIndex: 2 }}
       >
         <div className="flex items-center justify-between gap-1 px-3 py-2" style={{ background: grade ? bgByGrade(grade.label) : '#F9FAFB' }}>
           <span className="text-[12px] font-bold leading-snug text-nlg-text">{s.so}</span>
-          {grade ? (
-            <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0 ${grade.cls}`}>{score.toFixed(2)}</span>
-          ) : (
-            <span className="text-[9px] font-medium px-2 py-0.5 rounded-full shrink-0 bg-gray-100 text-nlg-text-subdued">Belum ada data</span>
-          )}
+          <div className="flex flex-col items-end gap-0.5 shrink-0">
+            {grade ? (
+              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${grade.cls}`}>{score.toFixed(2)}</span>
+            ) : (
+              <span className="text-[9px] font-medium px-2 py-0.5 rounded-full bg-gray-100 text-nlg-text-subdued">Belum ada data</span>
+            )}
+            {renderDelta(delta)}
+          </div>
         </div>
         {linkedKPIs.length > 0 ? (
           <div className="divide-y divide-nlg-border">
@@ -192,11 +269,13 @@ export const StrategyMap = ({ isCS = true }) => {
         ) : (
           <div className="px-3 py-1.5 text-[10px] text-nlg-text-subdued italic">Belum ada KPI terhubung</div>
         )}
-        {editMode && (
+        {editMode ? (
           <div className="px-3 py-1 text-[9px] text-nlg-primary bg-nlg-primary-tint/50 flex items-center justify-between">
             <span>✏️ Klik utk edit</span>
             {(s.linkedTo || []).length > 0 && <span title="Jumlah SO yang didorong">🔗 {s.linkedTo.length}</span>}
           </div>
+        ) : (
+          <div className="px-3 py-1 text-[9px] text-nlg-primary/60 bg-nlg-primary-tint/30">🔍 Klik utk detail KPI kontributor</div>
         )}
       </div>
     );
@@ -204,23 +283,27 @@ export const StrategyMap = ({ isCS = true }) => {
 
   const renderBand = (persp, items, isLast) => {
     const meta = PERSP_META[persp];
-    const perspScore = weightedAvgScore(items.flatMap((s) => kpisForSO(s.so)));
-    const perspGrade = perspScore !== null ? gradeFromTotal(perspScore) : null;
+    const summary = perspSummary.find((p) => p.persp === persp);
+    const visibleItems = focusMode ? items.filter(soNeedsAttention) : items;
     return (
       <div key={persp}>
         <div className="flex items-stretch gap-3">
           <div className="w-28 shrink-0 rounded-nlg-input flex flex-col items-center justify-center py-3 text-white text-center gap-1" style={{ background: meta.color }}>
             <div className="text-[11px] font-bold leading-tight">{persp}</div>
             <div className="text-[9px] opacity-75">Perspective</div>
-            <div className="text-xl font-black mt-1">{perspScore !== null ? perspScore.toFixed(2) : '—'}</div>
-            {perspGrade && (
-              <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${perspGrade.cls}`}>{perspGrade.label} · {perspGrade.text}</span>
+            <div className="text-xl font-black mt-1">{summary.score !== null ? summary.score.toFixed(2) : '—'}</div>
+            {summary.grade && (
+              <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${summary.grade.cls}`}>{summary.grade.label} · {summary.grade.text}</span>
             )}
+            {renderDelta(summary.delta)}
           </div>
           <div className="flex-1 flex flex-wrap gap-3 items-start p-3 rounded-nlg-card border" style={{ borderColor: meta.border, background: meta.light }}>
-            {items.map((s) => renderSOCard(s))}
+            {visibleItems.map((s) => renderSOCard(s))}
             {items.length === 0 && !editMode && (
               <div className="text-[11px] text-nlg-text-subdued italic py-4 px-2">Belum ada SO aktif</div>
+            )}
+            {items.length > 0 && visibleItems.length === 0 && (
+              <div className="text-[11px] text-green-700 italic py-4 px-2">🎉 Semua SO di perspektif ini sudah "Baik".</div>
             )}
             {editMode && (
               <button
@@ -257,7 +340,7 @@ export const StrategyMap = ({ isCS = true }) => {
             {AVAILABLE_YEARS.map((yr) => (
               <button
                 key={yr}
-                onClick={() => setViewYear(yr)}
+                onClick={() => { setViewYear(yr); setViewMonthIdx(CURRENT_MONTH_IDX); }}
                 className={`px-3 py-1 text-[11px] font-medium rounded-full border transition-colors ${
                   viewYear === yr
                     ? 'bg-nlg-primary text-white border-nlg-primary'
@@ -266,6 +349,24 @@ export const StrategyMap = ({ isCS = true }) => {
               >
                 {yr}
                 {yr === ACTIVE_PLAN_YEAR ? ' 🔓' : yr < ACTIVE_PLAN_YEAR ? ' ⏮' : ' ⏭'}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap justify-end max-w-md">
+            <span className="text-[11px] font-medium text-nlg-text-muted shrink-0">Bulan:</span>
+            {MONTH_LABELS.map((lbl, mi) => (
+              <button
+                key={mi}
+                onClick={() => mi <= CURRENT_MONTH_IDX && setViewMonthIdx(mi)}
+                className={`px-2 py-0.5 text-[10px] font-medium rounded-full border transition-colors ${
+                  viewMonthIdx === mi
+                    ? 'bg-nlg-primary text-white border-nlg-primary'
+                    : mi <= CURRENT_MONTH_IDX
+                    ? 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-primary-tint'
+                    : 'bg-nlg-sidebar text-nlg-text-subdued border-nlg-border opacity-40 cursor-default'
+                }`}
+              >
+                {lbl}{mi === CURRENT_MONTH_IDX ? ' 🔒' : ''}
               </button>
             ))}
           </div>
@@ -284,43 +385,79 @@ export const StrategyMap = ({ isCS = true }) => {
                 YTD
               </button>
             </div>
-            <span className="text-[11px] text-nlg-text-subdued">{MONTH_LABELS[CURRENT_MONTH_IDX]} {viewYear}</span>
+            <span className="text-[11px] text-nlg-text-subdued">{MONTH_LABELS[m]} {viewYear}{m === CURRENT_MONTH_IDX ? ' 🔒' : ''}</span>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-nlg-text-muted">Total Score{periodMode === 'ytd' ? ' (YTD)' : ' (MTD)'}:</span>
-            <span className={`text-base font-black ${textColorByGrade(companyGrade.label)}`}>{companyScore.toFixed(2)}</span>
+            <span className={`text-base font-black ${textColorByGrade(companyGrade.label)}`}>{companyScore !== null ? companyScore.toFixed(2) : '—'}</span>
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${companyGrade.cls}`}>{companyGrade.label} · {companyGrade.text}</span>
             <span className="text-[10px] text-nlg-text-subdued">(= Executive Dashboard)</span>
           </div>
         </div>
       </div>
 
-      {/* Company banner — ringkas (skor & periode sudah dipindah ke header atas) */}
-      <div
-        className="flex items-center gap-5 mb-5 px-5 py-3 rounded-nlg-card text-white"
-        style={{ background: 'linear-gradient(135deg,#172B4D,#1e3d6e)' }}
-      >
-        <div className="flex-1">
-          <div className="text-[11px] opacity-60 uppercase tracking-widest mb-0.5">
-            PT Niagamas Lestari Gemilang · {MONTH_LABELS[CURRENT_MONTH_IDX]} {viewYear}
+      {/* Executive Insight Strip — pengganti banner polos: menambahkan KONTEKS di atas angka mentah
+          (naik/turun vs bulan lalu, perspektif mana yg terkuat/perlu perhatian, & pintasan fokus ke KPI
+          merah) supaya CEO bisa scan situasi dlm hitungan detik tanpa perlu scroll/analisa manual. */}
+      <div className="rounded-nlg-card text-white mb-5 overflow-hidden" style={{ background: 'linear-gradient(135deg,#172B4D,#1e3d6e)' }}>
+        <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-white/10">
+          <div>
+            <div className="text-[11px] opacity-60 uppercase tracking-widest mb-0.5">
+              PT Niagamas Lestari Gemilang · {MONTH_LABELS[m]} {viewYear}
+            </div>
+            <div className="text-[13px] font-semibold opacity-80">Company Strategy Map — Balanced Scorecard</div>
           </div>
-          <div className="text-[13px] font-semibold opacity-80">
-            Company Strategy Map — Balanced Scorecard
-          </div>
+          {isCS && (
+            <button
+              onClick={() => {
+                setEditMode((v) => !v);
+                if (!editMode) toast('Edit Mode aktif — klik kartu SO untuk edit, atau "+ Tambah SO" pada tiap kolom.');
+              }}
+              className={`px-3 py-2 text-xs font-medium rounded-nlg-input border shrink-0 ${
+                editMode ? 'bg-amber-400 text-nlg-text border-amber-400' : 'bg-white/10 border-white/20 hover:bg-white/20 text-white'
+              }`}
+            >
+              {editMode ? '✓ Selesai Edit' : '✏️ Edit Mode'}
+            </button>
+          )}
         </div>
-        {isCS && (
+        <div className="flex flex-wrap divide-x divide-white/10">
+          <div className="flex-1 min-w-[170px] px-5 py-3">
+            <div className="text-[10px] opacity-60 uppercase tracking-wide mb-1">Total Score {periodMode === 'ytd' ? 'YTD' : 'MTD'}</div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-2xl font-black">{companyScore !== null ? companyScore.toFixed(2) : '—'}</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${companyGrade.cls}`}>{companyGrade.label}</span>
+              {renderDelta(companyDelta)}
+            </div>
+          </div>
+          <div className="flex-1 min-w-[170px] px-5 py-3">
+            <div className="text-[10px] opacity-60 uppercase tracking-wide mb-1">Tren {trailMonths.length} Bulan Terakhir <span className="opacity-50 normal-case">(klik utk pindah bulan)</span></div>
+            <TrendSparkline points={companyTrend} onSelectMonth={setViewMonthIdx} width={100} height={26} />
+          </div>
+          <div className="flex-1 min-w-[200px] px-5 py-3">
+            <div className="text-[10px] opacity-60 uppercase tracking-wide mb-1">Perspektif</div>
+            {strongestPersp && weakestPersp && strongestPersp.persp !== weakestPersp.persp ? (
+              <div className="text-[11px] font-semibold leading-snug">
+                <div className="text-green-300">🟢 Terkuat: {strongestPersp.persp}</div>
+                <div className="text-yellow-300">🟡 Perlu perhatian: {weakestPersp.persp}</div>
+              </div>
+            ) : strongestPersp ? (
+              <div className="text-[11px] font-semibold opacity-80">Performa merata — {strongestPersp.persp}</div>
+            ) : (
+              <div className="text-[11px] opacity-50">Belum ada data</div>
+            )}
+          </div>
           <button
-            onClick={() => {
-              setEditMode((v) => !v);
-              if (!editMode) toast('Edit Mode aktif — klik kartu SO untuk edit, atau "+ Tambah SO" pada tiap kolom.');
-            }}
-            className={`px-3 py-2 text-xs font-medium rounded-nlg-input border ${
-              editMode ? 'bg-amber-400 text-nlg-text border-amber-400' : 'bg-white/10 border-white/20 hover:bg-white/20 text-white'
-            }`}
+            onClick={() => setFocusMode((v) => !v)}
+            className={`flex-1 min-w-[220px] px-5 py-3 text-left transition-colors ${focusMode ? 'bg-red-500/90' : 'hover:bg-white/10'}`}
           >
-            {editMode ? '✓ Selesai Edit' : '✏️ Edit Mode'}
+            <div className="text-[10px] opacity-70 uppercase tracking-wide mb-1">KPI Merah Company-wide</div>
+            <div className="flex items-center gap-2">
+              <span className="text-2xl font-black">{totalRedKPIs}</span>
+              <span className="text-[10px] opacity-80">{focusMode ? '✓ Mode Fokus aktif — klik utk lihat semua' : 'Klik utk fokus ke SO perlu perhatian'}</span>
+            </div>
           </button>
-        )}
+        </div>
       </div>
 
       {/* Strategic Score cascade — SO per perspektif (Financial di atas, Learning & Growth di bawah,
@@ -347,10 +484,10 @@ export const StrategyMap = ({ isCS = true }) => {
               <div className="text-nlg-text-subdued text-lg leading-none my-1" title="Didorong oleh SO Financial lainnya">▲</div>
             </div>
           )}
-          {renderBand('Financial', financialBandSOs, false)}
-          {renderBand('Customer', soForPersp('Customer'), false)}
-          {renderBand('Internal Process', soForPersp('Internal Process'), false)}
-          {renderBand('Learning & Growth', soForPersp('Learning & Growth'), true)}
+          {renderBand('Financial', bandItems.Financial, false)}
+          {renderBand('Customer', bandItems.Customer, false)}
+          {renderBand('Internal Process', bandItems['Internal Process'], false)}
+          {renderBand('Learning & Growth', bandItems['Learning & Growth'], true)}
         </div>
       </div>
 
@@ -361,8 +498,79 @@ export const StrategyMap = ({ isCS = true }) => {
         <span>🔴 Score ≤1.5 — Kurang</span>
         <span>⬜ Belum ada data Actual</span>
         <span>┅➤ Korelasi antar-SO</span>
-        <span className="ml-auto">Data: {MONTH_LABELS[CURRENT_MONTH_IDX]} {viewYear} · {periodMode === 'ytd' ? 'YTD' : 'Bulan Berjalan'}</span>
+        <span>▲▼ Tren vs bulan lalu</span>
+        <span>🔍 Klik kartu SO utk detail KPI kontributor</span>
+        <span className="ml-auto">Data: {MONTH_LABELS[m]} {viewYear} · {periodMode === 'ytd' ? 'YTD' : 'Bulan Berjalan'}</span>
       </div>
+
+      {/* Detail modal — insight drill-down read-only saat kartu SO diklik di luar Edit Mode (CEO selalu,
+          CS saat tidak sedang Edit Mode): menampilkan tren skor SO & daftar KPI kontributor lintas-Dept
+          beserta asal Departemen-nya, supaya CEO bisa menelusuri "kenapa" tanpa perlu pindah halaman. */}
+      {detail && (() => {
+        const dKpis = kpisForSO(detail.so);
+        const dScore = weightedAvgScore(dKpis);
+        const dGrade = gradeFromTotal(dScore);
+        const dTrend = trendFor(dKpis);
+        const dDelta = deltaFromTrend(dTrend);
+        const dMeta = PERSP_META[perspOfSO(detail)];
+        return (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setDetail(null)}>
+            <div className="bg-white rounded-nlg-card w-full max-w-lg shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="px-5 py-4 flex items-start justify-between gap-3" style={{ background: dMeta.light }}>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: dMeta.textColor }}>{perspOfSO(detail)}</span>
+                  <div className="text-base font-bold text-nlg-text mt-0.5">{detail.so}</div>
+                </div>
+                <button onClick={() => setDetail(null)} className="text-nlg-text-subdued hover:text-nlg-text shrink-0">✕</button>
+              </div>
+              <div className="p-5 space-y-4">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div>
+                    <div className="text-[10px] text-nlg-text-subdued uppercase mb-1">Score {periodMode === 'ytd' ? 'YTD' : 'MTD'}</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-2xl font-black ${textColorByGrade(dGrade.label)}`}>{dScore !== null ? dScore.toFixed(2) : '—'}</span>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${dGrade.cls}`}>{dGrade.label} · {dGrade.text}</span>
+                      {renderDelta(dDelta)}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] text-nlg-text-subdued uppercase mb-1">Tren {trailMonths.length} Bulan</div>
+                    <TrendSparkline points={dTrend} onSelectMonth={setViewMonthIdx} width={100} height={28} />
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-semibold text-nlg-text-subdued uppercase tracking-wide mb-2">KPI Kontributor ({dKpis.length})</div>
+                  {dKpis.length === 0 ? (
+                    <div className="text-[12px] text-nlg-text-subdued italic">Belum ada KPI Approved/Locked yang terhubung ke SO ini.</div>
+                  ) : (
+                    <div className="border border-nlg-border rounded-nlg-input overflow-hidden">
+                      {dKpis.map((k) => {
+                        const st = kpiMonthStats(k, m);
+                        const ach = st ? (periodMode === 'ytd' ? computeAch(k.type, k.target, calcYTD(k, m)) : st.ach) : null;
+                        const kScore = st ? (periodMode === 'ytd' ? computeScore(ach, k.type) : st.score) : null;
+                        const kGrade = kScore !== null ? gradeFromScore(kScore) : null;
+                        return (
+                          <div key={k.id} className="flex items-center justify-between gap-2 px-3 py-2 border-b last:border-b-0 border-nlg-border">
+                            <div className="min-w-0">
+                              <div className="text-[12px] font-medium text-nlg-text truncate">{k.name}</div>
+                              <div className="text-[10px] text-nlg-text-subdued">{k._dept}</div>
+                            </div>
+                            {kGrade ? (
+                              <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${kGrade.cls}`}>{(ach * 100).toFixed(0)}% · {kScore}</span>
+                            ) : (
+                              <span className="text-[9px] text-nlg-text-subdued italic shrink-0">Belum ada Actual</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit modal */}
       {form && (

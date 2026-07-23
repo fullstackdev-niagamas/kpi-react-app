@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ACTIVE_PLAN_YEAR, AVAILABLE_YEARS } from '../data/mockData';
 import { useKPIContext } from '../context/KPIContext';
 import { statusPill, userShowSO } from '../utils/helpers';
+import { FEATURES } from '../config/features';
 
 export const History = ({ currentUserName }) => {
   const { users, batches, userKPIs } = useKPIContext();
@@ -19,6 +20,11 @@ export const History = ({ currentUserName }) => {
 
   // Riwayat batch milik user ini — sumber sama dengan Approval Queue/Mediation (KPIContext.batches),
   // jadi status di sini otomatis sinkron begitu Superior/CS bertindak (Sec. 8 — sumber tunggal).
+  // Diurutkan terbaru dulu (id = `${prefix}${Date.now()}_...` dari genId, jadi urut angka = urut waktu)
+  // — sebelumnya urutan insersi apa adanya bikin batch Planning lama (mis. sudah Approved) nongol di
+  // atas batch Planning terbaru (mis. masih Pending krn ada KPI baru ditambahkan setelah approval
+  // pertama), padahal keduanya sama2 label "Planning Tahun 2027 · 14 KPI · 100%" — sulit dibedakan
+  // sekilas mana yang berlaku sekarang tanpa buka & baca Revisi/status satu-satu (dilaporkan user).
   const BATCHES = batches
     .filter(b => b.user === currentUserName)
     .map(b => ({
@@ -28,7 +34,14 @@ export const History = ({ currentUserName }) => {
       revisi: b.revisi || 0, status: b.status,
       kpis: b.kpis,
       catatan: b.catatan || (b.by ? `${b.status} oleh ${b.by} · ${b.ts}` : 'Menunggu approval Superior'),
-    }));
+    }))
+    .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+
+  // Hanya jenis Planning yang bisa "dobel-terlihat" (1 submission mewakili seluruh Planning tahun itu,
+  // jadi submission baru scr konsep menggantikan yang lama) — jenis Actual SENGAJA tidak disentuh krn
+  // tiap batch = bulan yang berbeda (Jan/Feb/dst.), bukan versi lama dari batch yang sama, jadi semuanya
+  // tetap sejajar penting & harus tetap gampang diakses satu-satu, bukan diperlakukan sbg "riwayat lama".
+  const latestPlanningId = BATCHES.find(b => b.jenis === 'Planning')?.id ?? null;
 
   const renderYearBar = () => (
     <div className="flex items-center gap-2 mb-4 flex-wrap">
@@ -65,12 +78,17 @@ export const History = ({ currentUserName }) => {
       </div>
 
       <div className="space-y-2">
-        {BATCHES.map(b => (
-          <div key={b.id} className="border border-nlg-border rounded-nlg-card bg-white overflow-hidden">
-            <details>
+        {BATCHES.map(b => {
+          const isCurrentPlanning = b.jenis === 'Planning' && b.id === latestPlanningId;
+          const isOldPlanning = b.jenis === 'Planning' && !isCurrentPlanning;
+          return (
+          <div key={b.id} className={`border rounded-nlg-card bg-white overflow-hidden ${isOldPlanning ? 'border-nlg-border opacity-70' : 'border-nlg-border'}`}>
+            <details open={isCurrentPlanning}>
               <summary className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-nlg-sidebar select-none">
                 <div className="flex items-center gap-3">
                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded ${b.jenis === 'Planning' ? 'bg-nlg-primary-tint text-nlg-primary' : 'bg-purple-100 text-purple-700'}`}>{b.jenis}</span>
+                  {isCurrentPlanning && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">🕓 Terkini</span>}
+                  {isOldPlanning && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-nlg-text-subdued">📁 Riwayat</span>}
                   <div>
                     <div className="font-semibold text-sm">{b.batch}</div>
                     <div className="text-[11px] text-nlg-text-muted">{b.jumlahKPI} KPI{b.totalBobot !== null ? ` · Total Bobot ${b.totalBobot}%` : ''} · Revisi {b.revisi}/3</div>
@@ -121,7 +139,7 @@ export const History = ({ currentUserName }) => {
                             </>
                           )}
                         </tr>
-                        {k.isRed && k.pica && k.pica.length > 0 && (
+                        {FEATURES.PICA_ENABLED && k.isRed && k.pica && k.pica.length > 0 && (
                           <tr className="border-t border-red-200 bg-red-50/30">
                             <td colSpan={b.jenis === 'Planning' ? (showSOHist ? 6 : 5) : 4} className="px-2 py-2">
                               <div className="text-[10px] font-semibold text-red-700 mb-1.5">PICA — Problem Identification & Corrective Action:</div>
@@ -148,7 +166,8 @@ export const History = ({ currentUserName }) => {
               </div>
             </details>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { ACTIVE_PLAN_YEAR, AVAILABLE_YEARS, MONTH_LABELS, CURRENT_MONTH_IDX, TREND_LABELS, TREND_SCORE, TABLE_THEMES } from '../../data/mockData';
+import { ACTIVE_PLAN_YEAR, AVAILABLE_YEARS, MONTH_LABELS, CURRENT_MONTH_IDX, TABLE_THEMES } from '../../data/mockData';
 import { useKPIContext } from '../../context/KPIContext';
-import { kpiMonthStats, gradeFromTotal, gradeFromScore, scoreBg, scoreTextColor, calcYTD, computeAch, computeScore, badgeColorByPersp, deptScoreAt, buildDeptAggregates } from '../../utils/helpers';
+import { kpiMonthStats, kpiYTDStats, gradeFromTotal, gradeFromScore, scoreBg, scoreTextColor, badgeColorByPersp, deptScoreAt, deptScoreYTD, buildDeptAggregates } from '../../utils/helpers';
+import { TrendSparkline } from '../../components/TrendSparkline';
+import { FEATURES } from '../../config/features';
 
 const PERSP_ORDER = ['Financial', 'Customer', 'Internal Process', 'Learning & Growth'];
 
-// KPI merah (score<=1) di CURRENT_MONTH_IDX
-function redKpis(kpis) {
-  return kpis.filter(k => { const st = kpiMonthStats(k, CURRENT_MONTH_IDX); return st && st.score <= 1; });
+// KPI merah (score<=1) di bulan `mi` — diparameterisasi (2026-07-21, sebelumnya hardcoded
+// CURRENT_MONTH_IDX) supaya ikut berubah saat CEO/CS menjelajah bulan lain via viewMonthIdx.
+function redKpis(kpis, mi) {
+  return kpis.filter(k => { const st = kpiMonthStats(k, mi); return st && st.score <= 1; });
 }
 
 export const Executive = () => {
@@ -15,6 +18,13 @@ export const Executive = () => {
   const [viewYear, setViewYear] = useState(ACTIVE_PLAN_YEAR);
   const [selectedDept, setSelectedDept] = useState(null);
   const [deptMonthIdx, setDeptMonthIdx] = useState(CURRENT_MONTH_IDX);
+  // Ditambahkan (2026-07-21) — sebelumnya Company Scorecard (summary view) terkunci permanen ke
+  // CURRENT_MONTH_IDX, TIDAK bisa dijelajah per-bulan spt Monitoring Dashboard/Dept Drill-Down yg
+  // sudah lebih dulu interaktif (`deptMonthIdx`) — inkonsistensi yg ditemukan saat menambahkan
+  // toggle bulan interaktif ke Strategy Map (permintaan user, protokol poin B: diterapkan menyeluruh
+  // ke fitur relevan). Klik bulan di trend chart ATAU di month-picker strip mengubah `m` di seluruh
+  // halaman (CPI, 4 Perspektif, Cascading table, Strategic Risk Radar) sekaligus.
+  const [viewMonthIdx, setViewMonthIdx] = useState(CURRENT_MONTH_IDX);
 
   // Apply navy table theme for the BSC drill table
   useEffect(() => {
@@ -23,16 +33,36 @@ export const Executive = () => {
     Object.entries(t.vars).forEach(([k, val]) => root.style.setProperty(k, val));
   }, []);
 
-  const m = CURRENT_MONTH_IDX;
+  const m = viewMonthIdx;
 
   // Company-wide aggregates — Dept & score dihitung live dari users + userKPIs + batches
   // sungguhan (Sec. 8), sama seperti Monitoring Dashboard, supaya angka selalu konsisten.
   const allDepts = buildDeptAggregates(users, userKPIs, batches, m);
-  const companyScore = allDepts.length
-    ? allDepts.reduce((s, d) => s + d.score, 0) / allDepts.length
-    : 0;
+  // Tren CPI 6 bulan terakhir berakhir di bulan yg sedang dilihat `m` — MENGGANTIKAN `TREND_SCORE`
+  // (array statis [2.1,2.3,2.2,2.5,2.6,2.7] di mockData.js, ditemukan tidak pernah dihitung dari data
+  // sungguhan sama sekali, murni demo — kelas bug yg sama dgn "Strategy Map skor acak" yg sudah
+  // diperbaiki di v6.28, ternyata belum menyentuh widget CPI trend di Executive Dashboard ini).
+  const trailStart = Math.max(0, m - 5);
+  const trailMonths = Array.from({ length: m - trailStart + 1 }, (_, i) => trailStart + i);
+  const companyScoreForMonth = (mi) => {
+    const depts = buildDeptAggregates(users, userKPIs, batches, mi);
+    const scored = depts.filter(d => d.score !== null);
+    return scored.length ? scored.reduce((s, d) => s + d.score, 0) / scored.length : null;
+  };
+  const companyTrend = trailMonths.map(mi => ({
+    mi,
+    value: companyScoreForMonth(mi),
+    tooltip: `${MONTH_LABELS[mi]} ${viewYear} — ${companyScoreForMonth(mi) !== null ? companyScoreForMonth(mi).toFixed(2) : 'Belum ada data'}`,
+  }));
+  // `d.score` bisa null (deptScoreAt: dept ini py KPI tapi belum ada satu pun terisi bulan `m`) — Dept
+  // tsb DIKELUARKAN dari rata2 korporat (exclude & re-normalize, sama spt prinsip deptScoreAt sendiri),
+  // bukan diperlakukan skor 0 yg akan menjatuhkan Corporate Performance Index secara tidak akurat.
+  const scoredDepts = allDepts.filter(d => d.score !== null);
+  const companyScore = scoredDepts.length
+    ? scoredDepts.reduce((s, d) => s + d.score, 0) / scoredDepts.length
+    : null;
   const companyGrade = gradeFromTotal(companyScore);
-  const totalRed = allDepts.reduce((s, d) => s + redKpis(d.kpis).length, 0);
+  const totalRed = allDepts.reduce((s, d) => s + redKpis(d.kpis, m).length, 0);
   const totalPending = allDepts.reduce((s, d) => s + d.pending, 0);
 
   const yearBar = (onChange) => (
@@ -53,12 +83,12 @@ export const Executive = () => {
     const kpis = dept?.kpis || [];
     const groups = PERSP_ORDER.map(p => ({ persp: p, kpis: kpis.filter(k => k.persp === p) })).filter(g => g.kpis.length);
     const activeMonths = MONTH_LABELS.map((_, mi) => mi).filter(mi => mi <= m);
-    const reds = redKpis(kpis);
+    const reds = redKpis(kpis, deptMonthIdx);
     const scoreNow = deptScoreAt(kpis, deptMonthIdx);
     const grade = gradeFromTotal(scoreNow);
 
     const monthlyTotals = MONTH_LABELS.map((_, mi) => (mi <= m ? deptScoreAt(kpis, mi) : null));
-    const scoreCl = ts => ts <= 1.5 ? 'bg-red-400 text-white' : ts <= 2.5 ? 'bg-amber-400 text-white' : 'bg-green-500 text-white';
+    const scoreCl = ts => ts === null ? 'bg-gray-200 text-nlg-text-subdued' : ts <= 1.5 ? 'bg-red-400 text-white' : ts <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500 text-white';
 
     return (
       <div className="mb-5">
@@ -77,7 +107,7 @@ export const Executive = () => {
           <div className="border border-nlg-border rounded-nlg-card bg-white p-3"><div className="text-[10px] text-nlg-text-subdued uppercase">Submitted</div><div className="text-lg font-bold">{dept?.submitted ?? 0}</div></div>
           <div className="border border-nlg-border rounded-nlg-card bg-white p-3"><div className="text-[10px] text-nlg-text-subdued uppercase">KPI Merah</div><div className="text-lg font-bold text-red-600">{reds.length}</div></div>
           <div className="border border-nlg-border rounded-nlg-card bg-white p-3"><div className="text-[10px] text-nlg-text-subdued uppercase">Pending</div><div className="text-lg font-bold text-amber-600">{dept?.pending ?? 0}</div></div>
-          <div className="border border-nlg-border rounded-nlg-card bg-[#172B4D] text-white p-3"><div className="text-[10px] text-white/70 uppercase">Score MTD</div><div className="text-lg font-bold">{scoreNow.toFixed(2)} <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-white/20">{grade.label}</span></div></div>
+          <div className="border border-nlg-border rounded-nlg-card bg-[#172B4D] text-white p-3"><div className="text-[10px] text-white/70 uppercase">Score MTD</div><div className="text-lg font-bold">{scoreNow !== null ? scoreNow.toFixed(2) : '—'} <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-white/20">{grade.label}</span></div></div>
         </div>
 
         {/* Month bar */}
@@ -133,9 +163,8 @@ export const Executive = () => {
               {groups.map(g => {
                 const pw = (g.kpis.reduce((s, k) => s + k.weight, 0) * 100).toFixed(0);
                 return g.kpis.map((k, ki) => {
-                  const ytd = calcYTD(k, deptMonthIdx);
-                  const ytdAch = computeAch(k.type, k.target, ytd);
-                  const ytdScore = computeScore(ytdAch, k.type);
+                  // Null-safe (root cause bug 2026-07-22): lihat catatan `kpiYTDStats` di helpers.js.
+                  const stYTD = kpiYTDStats(k, deptMonthIdx);
                   return (
                     <tr key={k.id} className="hover:bg-nlg-sidebar/40">
                       {ki === 0 && (
@@ -159,8 +188,17 @@ export const Executive = () => {
                           </React.Fragment>
                         );
                       })}
-                      <td className={`px-1 py-1.5 text-center border border-nlg-border ${scoreTextColor(ytdScore)}`}>{(ytdAch * 100).toFixed(0)}%</td>
-                      <td className={`px-1 py-1.5 text-center font-bold border border-nlg-border ${scoreBg(ytdScore)}`}>{ytdScore}</td>
+                      {stYTD ? (
+                        <>
+                          <td className={`px-1 py-1.5 text-center border border-nlg-border ${scoreTextColor(stYTD.score)}`}>{(stYTD.ach * 100).toFixed(0)}%</td>
+                          <td className={`px-1 py-1.5 text-center font-bold border border-nlg-border ${scoreBg(stYTD.score)}`}>{stYTD.score}</td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="px-1 py-1.5 text-center border border-nlg-border text-nlg-text-subdued">—</td>
+                          <td className="px-1 py-1.5 text-center border border-nlg-border text-nlg-text-subdued">—</td>
+                        </>
+                      )}
                     </tr>
                   );
                 });
@@ -173,16 +211,27 @@ export const Executive = () => {
                 {activeMonths.map(mi => {
                   const ts = deptScoreAt(kpis, mi);
                   const tg = gradeFromTotal(ts);
-                  const cl = ts <= 1.5 ? 'bg-red-500' : ts <= 2.5 ? 'bg-amber-400' : 'bg-green-500';
+                  const cl = ts === null ? 'bg-gray-300' : ts <= 1.5 ? 'bg-red-500' : ts <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500';
                   return (
                     <React.Fragment key={mi}>
                       <td colSpan={2} className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">Total:</td>
-                      <td className={`px-2 py-2 text-center font-bold border tbdr ${cl}`}>{ts.toFixed(2)}<br /><span className="text-[10px]">{tg.label}</span></td>
+                      <td className={`px-2 py-2 text-center font-bold border tbdr ${cl}`}>{ts !== null ? ts.toFixed(2) : '—'}<br /><span className="text-[10px]">{tg.label}</span></td>
                     </React.Fragment>
                   );
                 })}
-                <td className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">YTD:</td>
-                <td className={`px-2 py-2 text-center font-bold border tbdr ${scoreNow <= 1.5 ? 'bg-red-500' : scoreNow <= 2.5 ? 'bg-amber-400' : 'bg-green-500'}`}>{scoreNow.toFixed(2)}<br /><span className="text-[10px]">{grade.label}</span></td>
+                {/* Sebelumnya kolom ini berlabel "YTD" tapi memakai `scoreNow` (skor MTD bulan
+                    `deptMonthIdx`, bukan rata2 Jan..deptMonthIdx) — mislabel, angkanya identik dgn
+                    kolom Total MTD di sampingnya. Diperbaiki pakai `deptScoreYTD` yg sesungguhnya. */}
+                {(() => {
+                  const ytdTs = deptScoreYTD(kpis, deptMonthIdx);
+                  const ytdGrade = gradeFromTotal(ytdTs);
+                  return (
+                    <>
+                      <td className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">YTD:</td>
+                      <td className={`px-2 py-2 text-center font-bold border tbdr ${ytdTs === null ? 'bg-gray-300' : ytdTs <= 1.5 ? 'bg-red-500' : ytdTs <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500'}`}>{ytdTs !== null ? ytdTs.toFixed(2) : '—'}<br /><span className="text-[10px]">{ytdGrade.label}</span></td>
+                    </>
+                  );
+                })()}
               </tr>
             </tbody>
           </table>
@@ -196,49 +245,64 @@ export const Executive = () => {
   const perspAgg = PERSP_ORDER.map(p => {
     const allK = allDepts.flatMap(d => d.kpis.filter(k => k.persp === p));
     const scores = allK.map(k => kpiMonthStats(k, m)).filter(Boolean).map(st => st.score);
-    const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+    // null (bukan 0) saat belum ada satu pun KPI perspektif ini terisi — konsisten dgn deptScoreAt,
+    // supaya card perspektif tampil "—" bukan "0.00" yg menyesatkan (seolah performa buruk).
+    const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
     const reds = allK.filter(k => { const st = kpiMonthStats(k, m); return st && st.score <= 1; }).length;
     return { persp: p, count: allK.length, score: avg, red: reds };
   });
 
-  const allRed = allDepts.flatMap(d => redKpis(d.kpis).map(k => ({ ...k, dept: d.dept })));
+  const allRed = allDepts.flatMap(d => redKpis(d.kpis, m).map(k => ({ ...k, dept: d.dept })));
 
   // Strategic alerts
   const alerts = [];
-  if (companyScore < 1.5) alerts.push({ type: 'critical', icon: '🔴', text: `Skor korporat ${companyScore.toFixed(2)} berada di zona KURANG — perlu intervensi BOD.` });
+  if (companyScore === null) alerts.push({ type: 'info', icon: 'ℹ️', text: 'Belum ada data Actual terisi di departemen mana pun bulan ini — skor korporat belum bisa dihitung.' });
+  else if (companyScore < 1.5) alerts.push({ type: 'critical', icon: '🔴', text: `Skor korporat ${companyScore.toFixed(2)} berada di zona KURANG — perlu intervensi BOD.` });
   else if (companyScore < 2.5) alerts.push({ type: 'warning', icon: '🟡', text: `Skor korporat ${companyScore.toFixed(2)} di zona CUKUP — beberapa departemen perlu perhatian.` });
   else alerts.push({ type: 'success', icon: '🟢', text: `Skor korporat ${companyScore.toFixed(2)} di zona BAIK — pertahankan momentum.` });
-  if (totalRed > 0) alerts.push({ type: 'critical', icon: '⚠️', text: `${totalRed} KPI berada di zona merah lintas departemen — pastikan PICA disubmit.` });
+  if (totalRed > 0) alerts.push({ type: 'critical', icon: '⚠️', text: FEATURES.PICA_ENABLED ? `${totalRed} KPI berada di zona merah lintas departemen — pastikan PICA disubmit.` : `${totalRed} KPI berada di zona merah lintas departemen.` });
   if (totalPending > 0) alerts.push({ type: 'info', icon: 'ℹ️', text: `${totalPending} submission menunggu approval superior.` });
 
-  const alertCls = { critical: 'border-red-300 bg-red-50 text-red-800', warning: 'border-amber-300 bg-amber-50 text-amber-800', info: 'border-blue-300 bg-blue-50 text-blue-800', success: 'border-green-300 bg-green-50 text-green-800' };
+  // `warning` dipakai KHUSUS utk alert zona skor "Cukup" (baris di atas) — ikut skala RAG performa,
+  // jadi diganti kuning. `critical`/`info`/`success` TIDAK diubah (merah/biru/hijau di luar cakupan).
+  const alertCls = { critical: 'border-red-300 bg-red-50 text-red-800', warning: 'border-yellow-300 bg-yellow-50 text-yellow-800', info: 'border-blue-300 bg-blue-50 text-blue-800', success: 'border-green-300 bg-green-50 text-green-800' };
 
   return (
     <div className="mb-5">
       <h1 className="text-xl font-bold text-nlg-text mb-1">Executive Dashboard</h1>
       <p className="text-sm text-nlg-text-muted mb-5">Helicopter view performa seluruh perusahaan untuk level BOD.</p>
-      {yearBar(() => setSelectedDept(null))}
+      {yearBar(() => { setSelectedDept(null); setViewMonthIdx(CURRENT_MONTH_IDX); })}
+
+      {/* Month picker — dijelajahi bulan per bulan (klik strip di bawah ATAU titik pada trend CPI di
+          bawah), pola identik Monitoring Dashboard supaya konsisten lintas fitur CS/CEO. */}
+      <div className="flex items-center gap-1.5 mb-5 flex-wrap">
+        <span className="text-[11px] font-medium text-nlg-text-muted shrink-0">Bulan:</span>
+        {MONTH_LABELS.map((lbl, mi) => (
+          <button key={mi} onClick={() => mi <= CURRENT_MONTH_IDX && setViewMonthIdx(mi)}
+            className={`px-2.5 py-1 text-[10px] font-medium rounded-full border transition-colors ${viewMonthIdx === mi ? 'bg-nlg-primary text-white border-nlg-primary' : mi <= CURRENT_MONTH_IDX ? 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-primary-tint' : 'bg-nlg-sidebar text-nlg-text-subdued border-nlg-border opacity-40 cursor-default'}`}>
+            {lbl}{mi === CURRENT_MONTH_IDX ? ' 🔒' : ''}
+          </button>
+        ))}
+      </div>
 
       {/* Corporate Performance Index + perspective cards */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-5">
         <div className="border border-nlg-border rounded-nlg-card bg-[#172B4D] text-white p-5 flex flex-col justify-center items-center lg:col-span-1">
           <div className="text-[11px] font-semibold text-white/70 uppercase tracking-wide mb-2 text-center">Corporate Performance Index</div>
-          <div className={`text-4xl font-bold ${companyScore >= 2.5 ? 'text-green-400' : companyScore >= 1.5 ? 'text-amber-400' : 'text-red-400'}`}>{companyScore.toFixed(2)}</div>
+          <div className={`text-4xl font-bold ${companyScore === null ? 'text-white/50' : companyScore >= 2.5 ? 'text-green-400' : companyScore >= 1.5 ? 'text-yellow-400' : 'text-red-400'}`}>{companyScore !== null ? companyScore.toFixed(2) : '—'}</div>
           <span className={`mt-2 text-[11px] px-2 py-0.5 rounded-full ${companyGrade.cls}`}>{companyGrade.text}</span>
-          <div className="mt-3 w-full flex items-end gap-1 h-10">
-            {TREND_SCORE.map((s, i) => {
-              const cl = s >= 2.5 ? 'bg-green-400' : s >= 1.5 ? 'bg-amber-400' : 'bg-red-400';
-              return <div key={i} className={`flex-1 rounded-t ${cl}`} style={{ height: `${(s / 3) * 100}%` }} title={`${TREND_LABELS[i]}: ${s}`}></div>;
-            })}
+          <div className="mt-3 w-full flex justify-center">
+            <TrendSparkline points={companyTrend} onSelectMonth={setViewMonthIdx} width={110} height={30} />
           </div>
+          <div className="text-[9px] text-white/50 mt-1">klik titik utk pindah bulan</div>
         </div>
         {perspAgg.map(p => {
           const g = gradeFromScore(p.score);
           return (
             <div key={p.persp} className="border border-nlg-border rounded-nlg-card bg-white p-4">
               <div className="text-[10px] font-semibold text-nlg-text-subdued uppercase tracking-wide mb-1">{p.persp}</div>
-              <div className="text-2xl font-bold">{p.score.toFixed(2)} <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${g.cls}`}>{g.label}</span></div>
-              <div className="mt-2 h-1.5 rounded-full bg-nlg-sidebar overflow-hidden"><div className={`h-full ${p.score >= 2.5 ? 'bg-green-500' : p.score >= 1.5 ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${(p.score / 3) * 100}%` }}></div></div>
+              <div className="text-2xl font-bold">{p.score !== null ? p.score.toFixed(2) : '—'} <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${g.cls}`}>{g.label}</span></div>
+              <div className="mt-2 h-1.5 rounded-full bg-nlg-sidebar overflow-hidden"><div className={`h-full ${p.score === null ? '' : p.score >= 2.5 ? 'bg-green-500' : p.score >= 1.5 ? 'bg-yellow-400' : 'bg-red-500'}`} style={{ width: `${p.score === null ? 0 : (p.score / 3) * 100}%` }}></div></div>
               <div className="mt-2 flex items-center justify-between text-[10px] text-nlg-text-muted"><span>{p.count} KPI</span>{p.red > 0 && <span className="text-red-600 font-semibold">🔴 {p.red}</span>}</div>
             </div>
           );
@@ -256,12 +320,12 @@ export const Executive = () => {
 
       {/* Cascading Achievement — All Departments */}
       <div className="border border-nlg-border rounded-nlg-card bg-white overflow-hidden mb-5">
-        <div className="px-4 py-3 bg-nlg-sidebar border-b border-nlg-border text-[11px] font-semibold text-nlg-text-subdued uppercase tracking-wide">Cascading Achievement — Semua Departemen</div>
+        <div className="px-4 py-3 bg-nlg-sidebar border-b border-nlg-border text-[11px] font-semibold text-nlg-text-subdued uppercase tracking-wide">Cascading Achievement — Semua Departemen · {MONTH_LABELS[m]} {viewYear}</div>
         <table className="w-full text-sm text-left">
           <thead className="bg-white text-nlg-text-subdued text-[11px] uppercase border-b border-nlg-border">
             <tr>
               <th className="px-4 py-3">Departemen</th>
-              <th className="px-4 py-3">Score MTD</th>
+              <th className="px-4 py-3">Score {MONTH_LABELS[m]}</th>
               <th className="px-4 py-3 text-center">vs Company</th>
               <th className="px-4 py-3 text-center">KPI Merah</th>
               <th className="px-4 py-3 text-center">Submission</th>
@@ -269,23 +333,25 @@ export const Executive = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-nlg-border">
-            {[...allDepts].sort((a, b) => b.score - a.score).map((d, i) => {
+            {/* Dept dgn score null (belum ada KPI terisi bulan ini) diurutkan ke bawah, bukan ikut
+                aritmetika b.score - a.score yg jadi NaN & merusak urutan sort. */}
+            {[...allDepts].sort((a, b) => (b.score ?? -1) - (a.score ?? -1)).map((d, i) => {
               const g = gradeFromTotal(d.score);
-              const delta = d.score - companyScore;
-              const reds = redKpis(d.kpis).length;
+              const delta = (d.score !== null && companyScore !== null) ? d.score - companyScore : null;
+              const reds = redKpis(d.kpis, m).length;
               return (
                 <tr key={i} className="hover:bg-nlg-sidebar/40">
                   <td className="px-4 py-3 font-medium text-nlg-text"><span className="text-nlg-text-subdued mr-2">{i + 1}.</span>{d.dept}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <div className="w-24 h-2 rounded-full bg-nlg-sidebar overflow-hidden"><div className={`h-full ${d.score >= 2.5 ? 'bg-green-500' : d.score >= 1.5 ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${(d.score / 3) * 100}%` }}></div></div>
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{d.score.toFixed(2)} {g.label}</span>
+                      <div className="w-24 h-2 rounded-full bg-nlg-sidebar overflow-hidden"><div className={`h-full ${d.score === null ? '' : d.score >= 2.5 ? 'bg-green-500' : d.score >= 1.5 ? 'bg-yellow-400' : 'bg-red-500'}`} style={{ width: `${d.score === null ? 0 : (d.score / 3) * 100}%` }}></div></div>
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{d.score !== null ? d.score.toFixed(2) : '—'} {g.label}</span>
                     </div>
                   </td>
-                  <td className={`px-4 py-3 text-center text-[11px] font-semibold ${delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>{delta >= 0 ? '▲' : '▼'} {Math.abs(delta).toFixed(2)}</td>
+                  <td className={`px-4 py-3 text-center text-[11px] font-semibold ${delta === null ? 'text-nlg-text-subdued' : delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>{delta === null ? '—' : <>{delta >= 0 ? '▲' : '▼'} {Math.abs(delta).toFixed(2)}</>}</td>
                   <td className="px-4 py-3 text-center">{reds > 0 ? <span className="text-red-600 font-bold">{reds}</span> : <span className="text-green-600">0</span>}</td>
                   <td className="px-4 py-3 text-center text-[11px] text-nlg-text-muted">{d.approved}/{d.submitted}{d.pending > 0 && <span className="text-amber-600"> · {d.pending} pending</span>}</td>
-                  <td className="px-4 py-3 text-center"><button onClick={() => { setSelectedDept(d.dept); setDeptMonthIdx(CURRENT_MONTH_IDX); }} className="text-nlg-primary hover:underline text-[11px] font-medium">Detail →</button></td>
+                  <td className="px-4 py-3 text-center"><button onClick={() => { setSelectedDept(d.dept); setDeptMonthIdx(viewMonthIdx); }} className="text-nlg-primary hover:underline text-[11px] font-medium">Detail →</button></td>
                 </tr>
               );
             })}
@@ -336,7 +402,7 @@ export const Executive = () => {
                   <tr key={p.persp} className="hover:bg-nlg-sidebar/40">
                     <td className="px-4 py-2.5 font-medium">{p.persp}</td>
                     <td className="px-4 py-2.5 text-center">{p.count}</td>
-                    <td className="px-4 py-2.5 text-center"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{p.score.toFixed(2)} {g.label}</span></td>
+                    <td className="px-4 py-2.5 text-center"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{p.score !== null ? p.score.toFixed(2) : '—'} {g.label}</span></td>
                     <td className="px-4 py-2.5 text-center">{p.red > 0 ? <span className="text-red-600 font-bold">{p.red}</span> : '0'}</td>
                   </tr>
                 );

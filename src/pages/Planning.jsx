@@ -3,6 +3,7 @@ import { ACTIVE_PLAN_YEAR, CURRENT_MONTH_IDX, PERSPECTIVES, MTD_CATEGORIES, YTD_
 import { useKPIContext } from '../context/KPIContext';
 import { useToast } from '../context/ToastContext';
 import { Icon } from '../components/Icons';
+import { getMandatoryKPIsFor } from '../utils/helpers';
 
 // Sec. 4.4 Project Brief: KPI Mandatory bisa berasal dari 3 sumber cascade
 const cascadeLabel = (k) => {
@@ -12,10 +13,13 @@ const cascadeLabel = (k) => {
   return '';
 };
 
-const emptyForm = { persp: 'Financial', so: '', name: '', desc: '', type: 'Max', mtdCat: 'DIRECT', ytdCat: 'LAST', period: 'Bulanan', target: 100, uom: '%', weight: 20 };
+const emptyForm = { persp: 'Financial', so: '', name: '', desc: '', type: 'Max', mtdCat: 'DIRECT', ytdCat: 'LAST', period: 'Bulanan', target: 100, uom: '%', weight: 20, factorNote: '' };
 
 export const Planning = ({ currentUserName }) => {
-  const { users, sos, kpis, userKPIs, addUserKPI, updateUserKPI, submitUserKPIStatus, addBatch } = useKPIContext();
+  const {
+    users, sos, kpis, userKPIs, addUserKPI, updateUserKPI, submitUserKPIStatus, addBatch,
+    dismissedMandatory, dismissMandatoryKPI, undismissMandatoryKPI,
+  } = useKPIContext();
   const toast = useToast();
   const [viewYear, setViewYear] = useState(ACTIVE_PLAN_YEAR);
   const [editingId, setEditingId] = useState(null);
@@ -27,11 +31,8 @@ export const Planning = ({ currentUserName }) => {
   const stratObjActive = userMeta.level === 'Company' || userMeta.level === 'Dept';
 
   // KPI Mandatory dari KPI Builder — 3 sumber cascade (lihat cascadeLabel di atas & Sec. 4.4 Project Brief).
-  const cascadedKPIs = kpis.filter(k => k.status === 'Active' && (
-    (k.owner_type === 'company' && (k.cascade_depts || []).includes(userMeta.dept)) ||
-    (k.owner_type === 'dept' && k.owner_name === userMeta.dept) ||
-    (k.owner_type === 'user' && k.owner_name === userMeta.name)
-  ));
+  const cascadedKPIs = getMandatoryKPIsFor(userMeta, kpis);
+  const dismissedIds = dismissedMandatory[currentUserName] || [];
 
   // Planning items = KPI instance milik user ini (Sec. 8 — sumber tunggal, dipakai juga oleh
   // Dashboard/ActualInput/History/Team/Monitoring/Executive). Weight disimpan sbg fraksi 0-1
@@ -100,6 +101,10 @@ export const Planning = ({ currentUserName }) => {
         type: i.type, uom: i.uom, period: i.period,
         mtdCat: i.mtdCat, ytdCat: i.ytdCat,
         target: `${i.target}${i.uom === '%' ? '%' : ''}`, bobot: `${(i.weight * 100).toFixed(0)}%`,
+        // Diteruskan ke batch snapshot supaya Approval Queue (Superior) juga bisa menampilkan badge
+        // Mandatory & Kategori Indikator per baris — sebelumnya hanya tersimpan di userKPIs, hilang
+        // begitu masuk ke tabel Approval Queue.
+        mandatory: !!i.mandatory, indicatorCategory: i.indicatorCategory || '',
       })),
       focusNote: 'Validasi: struktur KPI, Kategori Formula MTD/YTD, bobot, dan target setiap KPI.',
     });
@@ -179,13 +184,15 @@ export const Planning = ({ currentUserName }) => {
             <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">{cascadedKPIs.length} KPI</span>
             {(() => {
               const savedCount = cascadedKPIs.filter(k => planningItems.some(p => p.sourceKpiId === k.id)).length;
-              return savedCount < cascadedKPIs.length ? (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">⚠️ {savedCount}/{cascadedKPIs.length} tersimpan ke Planning</span>
+              const dismissedCount = cascadedKPIs.filter(k => dismissedIds.includes(k.id)).length;
+              const resolvedCount = savedCount + dismissedCount;
+              return resolvedCount < cascadedKPIs.length ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">⚠️ {resolvedCount}/{cascadedKPIs.length} ditinjau</span>
               ) : (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">✅ Semua tersimpan</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">✅ Semua ditinjau</span>
               );
             })()}
-            <span className="text-[10px] text-nlg-text-subdued ml-2">Ditetapkan CS · Semua field terkunci kecuali Target &amp; Bobot — klik "💾 Simpan ke Planning" tiap kartu utk memasukkannya ke Planning</span>
+            <span className="text-[10px] text-nlg-text-subdued ml-2">Ditetapkan CS · Semua field terkunci kecuali Target &amp; Bobot — klik "💾 Simpan ke Planning" kalau relevan, atau "✕ Tidak Relevan" kalau tidak berlaku untuk peran Anda</span>
           </div>
           <div className="space-y-3">
             {cascadedKPIs.map(k => {
@@ -194,6 +201,7 @@ export const Planning = ({ currentUserName }) => {
               // (bukan duplikat), dan otomatis muncul di Dashboard/ActualInput/History/Team spt KPI biasa.
               const savedInstance = planningItems.find(p => p.sourceKpiId === k.id);
               const isEditable = !savedInstance || savedInstance.status === 'Draft';
+              const isDismissed = dismissedIds.includes(k.id);
               const ovr = cascadeOverrides[k.id] || {};
               const baseTarget = savedInstance ? savedInstance.target : k.target;
               const baseWeight = savedInstance ? savedInstance.weight * 100 : k.weight;
@@ -204,6 +212,7 @@ export const Planning = ({ currentUserName }) => {
                 const payload = {
                   sourceKpiId: k.id, mandatory: true,
                   persp: k.persp, so: k.so || '', name: k.name, desc: k.desc || '',
+                  factorNote: k.factorNote || '', indicatorCategory: k.indicatorCategory || '',
                   type: k.type, uom: k.uom, period: k.period, mtdCat: k.mtdCat, ytdCat: k.ytdCat,
                   target: Number(userTarget) || 0, weight: (Number(userWeight) || 0) / 100,
                   status: 'Draft',
@@ -218,9 +227,26 @@ export const Planning = ({ currentUserName }) => {
                 setCascadeOverrides(prev => { const n = { ...prev }; delete n[k.id]; return n; });
               };
 
+              if (isDismissed) {
+                return (
+                  <div key={k.id} className="border border-nlg-border bg-nlg-sidebar rounded-nlg-input px-4 py-2.5 flex items-center justify-between gap-3">
+                    <span className="text-sm text-nlg-text-muted line-through decoration-nlg-text-subdued">{k.name}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-200 text-nlg-text-muted">✕ Tidak Relevan</span>
+                      <button onClick={() => undismissMandatoryKPI(currentUserName, k.id)} className="text-nlg-primary text-[11px] font-medium hover:underline">↩ Sertakan lagi</button>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div key={k.id} className="border border-blue-200 bg-blue-50/60 rounded-nlg-input p-4 relative">
-                  <div className="absolute top-3 right-3">
+                  <div className="absolute top-3 right-3 flex items-center gap-1.5">
+                    {k.indicatorCategory && (
+                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${k.indicatorCategory === 'Leading' ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
+                        {k.indicatorCategory === 'Leading' ? '⏩' : '🎯'} {k.indicatorCategory}
+                      </span>
+                    )}
                     <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white">{cascadeLabel(k)}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-3 mb-3">
@@ -237,6 +263,12 @@ export const Planning = ({ currentUserName }) => {
                     <div className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide mb-1">Nama KPI</div>
                     <div className="text-sm font-bold text-nlg-text bg-white/80 rounded px-2 py-1.5 border border-blue-100 opacity-80">{k.name} <span className="text-[10px] text-blue-600">🔒</span></div>
                   </div>
+                  {k.factorNote && (
+                    <div className="mb-3">
+                      <div className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide mb-1">Catatan Factor 1/2 🔒</div>
+                      <div className="text-sm bg-white/80 rounded px-2 py-1.5 border border-blue-100 opacity-80">{k.factorNote}</div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-4 gap-3 mb-3">
                     <div>
                       <div className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide mb-1">UoM 🔒</div>
@@ -277,11 +309,18 @@ export const Planning = ({ currentUserName }) => {
                         <span className="text-amber-700 font-medium">⚠️ Belum disimpan ke Planning</span>
                       )}
                     </span>
-                    {isEditable && (
-                      <button onClick={saveMandatory} className="px-3 py-1.5 text-xs font-medium rounded-nlg-input bg-nlg-primary text-white hover:bg-nlg-primary/90">
-                        💾 {savedInstance ? 'Update' : 'Simpan ke Planning'}
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {!savedInstance && (
+                        <button onClick={() => dismissMandatoryKPI(currentUserName, k.id)} className="px-3 py-1.5 text-xs font-medium rounded-nlg-input border border-nlg-border text-nlg-text-muted hover:bg-nlg-sidebar">
+                          ✕ Tidak Relevan
+                        </button>
+                      )}
+                      {isEditable && (
+                        <button onClick={saveMandatory} className="px-3 py-1.5 text-xs font-medium rounded-nlg-input bg-nlg-primary text-white hover:bg-nlg-primary/90">
+                          💾 {savedInstance ? 'Update' : 'Simpan ke Planning'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
@@ -331,6 +370,11 @@ export const Planning = ({ currentUserName }) => {
           <div>
             <label className="text-xs font-medium text-nlg-text-muted">Deskripsi/Parameter * <span className="text-nlg-text-subdued">(free text)</span></label>
             <textarea required rows="2" value={form.desc} onChange={e => setForm({ ...form, desc: e.target.value })} placeholder="mis. Pertumbuhan revenue dibandingkan target tahunan" className="mt-1 w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm"></textarea>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-nlg-text-muted">Catatan Factor 1/2 <span className="text-nlg-text-subdued">(opsional)</span></label>
+            <input value={form.factorNote} onChange={e => setForm({ ...form, factorNote: e.target.value })} placeholder="mis. F1 = Revenue Aktual (Rp) · F2 = Revenue Target (Rp)" className="mt-1 w-full border border-nlg-border rounded-nlg-input px-3 py-2 text-sm" />
+            <div className="text-[10px] text-nlg-text-subdued mt-0.5">Tampil di Input Realisasi tepat di titik input F1/F2 — supaya jelas angka apa yg harus diinput.</div>
           </div>
           <div>
             <label className="text-xs font-medium text-nlg-text-muted">Tipe KPI *</label>

@@ -33,13 +33,19 @@ function App() {
   useEffect(() => { localStorage.setItem('kpi_active_page', currentPage); }, [currentPage]);
 
   const renderPage = () => {
+    // `key={currentUserName}` di 6 halaman personal ini SENGAJA dipasang — komponennya tetap sama
+    // (posisi/tipe tidak berubah) begitu User ganti akun via "Login sebagai", jadi React TIDAK
+    // otomatis reset state internal (selectedMember di Team.jsx, selectedKpiId/drafts di
+    // ActualInput.jsx, dst.) hanya krn prop currentUserName berubah — itulah root cause "harus
+    // refresh browser dulu baru update" yang dilaporkan user. `key` beda → React unmount+mount ulang
+    // komponen dari nol, state internal otomatis bersih utk akun yang baru dipilih, tanpa reload manual.
     switch (currentPage) {
-      case 'dashboard': return <Dashboard currentUserName={currentUserName} />;
-      case 'planning': return <Planning currentUserName={currentUserName} />;
-      case 'actualInput': return <ActualInput currentUserName={currentUserName} />;
-      case 'history': return <History currentUserName={currentUserName} />;
-      case 'approval': return <Approval currentUserName={currentUserName} />;
-      case 'team': return <Team currentUserName={currentUserName} />;
+      case 'dashboard': return <Dashboard key={currentUserName} currentUserName={currentUserName} />;
+      case 'planning': return <Planning key={currentUserName} currentUserName={currentUserName} />;
+      case 'actualInput': return <ActualInput key={currentUserName} currentUserName={currentUserName} />;
+      case 'history': return <History key={currentUserName} currentUserName={currentUserName} />;
+      case 'approval': return <Approval key={currentUserName} currentUserName={currentUserName} />;
+      case 'team': return <Team key={currentUserName} currentUserName={currentUserName} />;
       
       // CS Pages
       case 'masterUser': return <MasterUser />;

@@ -9,12 +9,13 @@ import {
 } from '../../data/mockData';
 import { useKPIContext } from '../../context/KPIContext';
 import { kpiMonthStats, gradeFromTotal, buildDeptAggregates } from '../../utils/helpers';
+import { FEATURES } from '../../config/features';
 
 const CONTENT_SECTIONS = [
   { id: 'exec', label: 'Executive Summary (Company Score + 4 Perspektif)' },
   { id: 'cascade', label: 'Cascading Dept Scorecard' },
   { id: 'detail', label: 'KPI Detail per Dept (bulan terpilih)' },
-  { id: 'pica', label: 'PICA Log (KPI Merah + Action Plan)' },
+  ...(FEATURES.PICA_ENABLED ? [{ id: 'pica', label: 'PICA Log (KPI Merah + Action Plan)' }] : []),
 ];
 
 // Build periode options: 12 months (MTD) + roll-up YTD windows.
@@ -35,7 +36,7 @@ export const Reports = () => {
   const [year, setYear] = useState(ACTIVE_PLAN_YEAR);
   const [periode, setPeriode] = useState('m' + CURRENT_MONTH_IDX);
   const [scope, setScope] = useState('Seluruh Company');
-  const [checked, setChecked] = useState({ exec: true, cascade: true, detail: true, pica: true });
+  const [checked, setChecked] = useState({ exec: true, cascade: true, detail: true, pica: FEATURES.PICA_ENABLED });
   const [showPreview, setShowPreview] = useState(false);
 
   // Dept live dari data sungguhan (Sec. 8) — sama dengan Monitoring/Executive.
@@ -64,14 +65,17 @@ export const Reports = () => {
         scope === 'Seluruh Company'
           ? allDepts
           : allDepts.filter((d) => d.dept === scope);
-      // Company aggregate row (only when whole-company scope).
+      // Company aggregate row (only when whole-company scope). Dept dgn score null (belum ada KPI
+      // terisi bulan ini) dikeluarkan dari rata2 — konsisten dgn deptScoreAt (exclude & re-normalize).
       if (scope === 'Seluruh Company') {
-        const compScore =
-          targetRows.reduce((a, d) => a + d.score, 0) / (targetRows.length || 1);
+        const scoredRows = targetRows.filter((d) => d.score !== null);
+        const compScore = scoredRows.length
+          ? scoredRows.reduce((a, d) => a + d.score, 0) / scoredRows.length
+          : null;
         const cg = gradeFromTotal(compScore);
         rows.push([
           'Company (Rata-rata)',
-          compScore.toFixed(2),
+          compScore !== null ? compScore.toFixed(2) : '—',
           `${cg.label} — ${cg.text}`,
           targetRows.reduce((a, d) => a + d.submitted, 0),
           targetRows.reduce((a, d) => a + d.approved, 0),
@@ -82,7 +86,7 @@ export const Reports = () => {
         const g = gradeFromTotal(d.score);
         rows.push([
           d.dept,
-          d.score.toFixed(2),
+          d.score !== null ? d.score.toFixed(2) : '—',
           `${g.label} — ${g.text}`,
           d.submitted,
           d.approved,
@@ -102,7 +106,7 @@ export const Reports = () => {
       allDepts.filter((d) => scopeDepts.includes(d.dept)).forEach((d) => {
         const g = gradeFromTotal(d.score);
         const pctApproved = d.submitted ? Math.round((d.approved / d.submitted) * 100) : 0;
-        rows.push([d.dept, d.score.toFixed(2), `${g.label} — ${g.text}`, `${pctApproved}%`]);
+        rows.push([d.dept, d.score !== null ? d.score.toFixed(2) : '—', `${g.label} — ${g.text}`, `${pctApproved}%`]);
       });
       sections.push({ name: 'Cascading Scorecard', rows });
     }

@@ -39,6 +39,27 @@
 .tree-collapsed [data-tree-toggle] svg { transform: rotate(-90deg); }
 .tree-collapsed > .tree-children { display:none; }
 
+/* ── Cascade & Alignment Tree (KPI Builder → node Individual) — pure-CSS org-chart connectors,
+   dipakai bareng box Tailwind biasa utk isi tiap node. Warna garis pakai --nlg-border (#DFE1E6). ── */
+.cascade-tree, .cascade-tree ul, .cascade-tree li { list-style: none; margin: 0; padding: 0; position: relative; }
+.cascade-tree { display: flex; justify-content: center; min-width: max-content; padding: 4px 8px 0; }
+.cascade-tree ul { display: flex; padding-top: 24px; position: relative; }
+.cascade-tree li { display: flex; flex-direction: column; align-items: center; padding: 0 10px; position: relative; }
+.cascade-tree > li { padding-top: 0; }
+.cascade-tree ul li::before {
+  content: ''; position: absolute; top: 0; right: 50%; width: 50%; height: 24px; border-top: 2px solid #C1C7D0;
+}
+.cascade-tree ul li::after {
+  content: ''; position: absolute; top: 0; left: 50%; width: 50%; height: 24px; border-top: 2px solid #C1C7D0; border-left: 2px solid #C1C7D0;
+}
+.cascade-tree ul li:first-child::before { border-top: none; }
+.cascade-tree ul li:last-child::after { border-top: none; }
+.cascade-tree ul li:only-child::before, .cascade-tree ul li:only-child::after { display: none; }
+.cascade-tree ul::before {
+  content: ''; position: absolute; top: -24px; left: 50%; width: 0; height: 24px; border-left: 2px solid #C1C7D0;
+}
+.cascade-tree > li > ul::before { display: none; }
+
 /* ── Theme table header classes (dikontrol oleh applyTableTheme via CSS vars) ── */
 :root {
   --th1: #172B4D;
@@ -49,12 +70,28 @@
   --tytd: #1a4d3a;
 }
 
-.th1  { background-color: var(--th1, #172B4D) !important; color: var(--th-text, #fff) !important; }
-.th2  { background-color: var(--th2, #1e3561) !important; color: var(--th-text, #fff) !important; }
+.th1  { background: linear-gradient(135deg, var(--th1, #172B4D) 0%, var(--th2, #1e3561) 140%) !important; color: var(--th-text, #fff) !important; }
+.th2  { background: linear-gradient(135deg, var(--th2, #1e3561) 0%, var(--th1, #172B4D) 140%) !important; color: var(--th-text, #fff) !important; }
 .tpast{ background-color: var(--tpast, #2d3f5e) !important; color: var(--th-text, #fff) !important; }
-.ttotal{ background-color: var(--ttotal, #0f1f38) !important; color: var(--th-text, #fff) !important; }
+.ttotal{ background: linear-gradient(135deg, var(--ttotal, #0f1f38) 0%, var(--th1, #172B4D) 140%) !important; color: var(--th-text, #fff) !important; }
 .tytd { background-color: var(--tytd, #1a4d3a) !important; color: #dcfce7 !important; }
 .tbdr { border-color: rgba(255,255,255,0.15) !important; }
+
+/* ── Table polish: zebra rows (skip sticky/colored cells) + scroll-affordance shadow on last sticky col ── */
+.tbl-zebra tbody tr:nth-child(even) td:not([class*="sticky"]) { background-color: #FAFBFD; }
+.sticky-shadow { box-shadow: 4px 0 8px -4px rgba(23,43,77,0.18); }
+
+/* ── "Clean" table mode: strip the per-cell grid box (Excel-y look) from ordinary data cells, keep
+   only a thin row divider + more breathing room. Sticky label columns and the Total Score row keep
+   their original border so the fixed row-header rail and the summary strip stay clearly delimited. ── */
+.tbl-clean tbody tr:not(.th1) td:not([class*="sticky"]) {
+  border-left-width: 0 !important;
+  border-right-width: 0 !important;
+  border-top-width: 0 !important;
+  border-bottom: 1px solid #EEF0F2 !important;
+  padding-top: 0.5rem !important;
+  padding-bottom: 0.5rem !important;
+}
 
 @media print {
   @page { size: A4 landscape; margin: 1cm; }
@@ -64,5 +101,5 @@
   .overflow-x-auto { overflow: visible !important; }
   table { page-break-inside: avoid; font-size: 10px; }
   .th1 { background-color: #172B4D !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .bg-green-500, .bg-amber-400, .bg-red-500 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bg-green-500, .bg-yellow-400, .bg-red-500 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

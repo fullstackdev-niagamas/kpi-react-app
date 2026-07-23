@@ -15,7 +15,7 @@ export const YTD_CATEGORIES = [
   { id: 'AVG',  label: 'AVG',  desc: 'Mengkalkulasi dengan cara merata-ratakan %Actual (MTD) yang sudah dihasilkan tiap bulan dari Januari s.d. bulan berjalan.' },
 ];
 
-export const CURRENT_MONTH_IDX = 1; // 1 = Feb
+export const CURRENT_MONTH_IDX = 1; // 1 = Feb — real simulation Jan→Jun 2027, dinaikkan bertahap per bulan (2026-07-20)
 export const ACTIVE_PLAN_YEAR = 2027;
 export const AVAILABLE_YEARS = [2025, 2026, 2027];
 export const MONTH_LABELS = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
@@ -886,6 +886,7 @@ export const INITIAL_USER_KPIS = {
       "so": "Business Process Excellence",
       "name": "Audit Score Index",
       "desc": "Achievement Audit Score Index",
+      "factorNote": "F1 = Skor Audit Tercapai (Point) · F2 = Skor Audit Target (Point)",
       "type": "Max",
       "uom": "Point",
       "period": "Bulanan",
@@ -922,6 +923,8 @@ export const INITIAL_USER_KPIS = {
         null,
         null
       ],
+      "suggestedFactor1": [92, 95, 97, 90, 96, 98, null, null, null, null, null, null],
+      "suggestedFactor2": [100, 100, 100, 100, 100, 100, null, null, null, null, null, null],
       "id": "uk1783911278942_32z3v"
     },
     {
@@ -931,6 +934,7 @@ export const INITIAL_USER_KPIS = {
       "so": "Business Process Excellence",
       "name": "Annual Plan KPI cascading",
       "desc": "#Individual KPI / Total eligible employee",
+      "factorNote": "F1 = Individual KPI Tercapai (jumlah) · F2 = Total Eligible Employee (jumlah)",
       "type": "Max",
       "uom": "%",
       "period": "Bulanan",
@@ -967,6 +971,8 @@ export const INITIAL_USER_KPIS = {
         null,
         null
       ],
+      "suggestedFactor1": [180, 188, 195, 190, 200, 205, null, null, null, null, null, null],
+      "suggestedFactor2": [206, 206, 208, 208, 210, 210, null, null, null, null, null, null],
       "id": "uk1783911284612_85f5y"
     },
     {
@@ -1888,6 +1894,11 @@ export const CS_KPI_LIBRARY = [
     "so": "Business Process Excellence",
     "name": "Audit Score Index",
     "desc": "Achievement Audit Score Index",
+    "factorNote": "F1 = Skor Audit Tercapai (Point) · F2 = Skor Audit Target (Point)",
+    "indicatorCategory": "Lagging",
+    "dataSuggestionEnabled": true,
+    "dataSourceLabel": "Internal Audit System",
+    "integrationKey": "audit-system.score-index",
     "uom": "Point",
     "type": "Max",
     "period": "Bulanan",
@@ -1930,6 +1941,11 @@ export const CS_KPI_LIBRARY = [
     "so": "Business Process Excellence",
     "name": "Annual Plan KPI cascading",
     "desc": "#Individual KPI / Total eligible employee",
+    "factorNote": "F1 = Individual KPI Tercapai (jumlah) · F2 = Total Eligible Employee (jumlah)",
+    "indicatorCategory": "Leading",
+    "dataSuggestionEnabled": true,
+    "dataSourceLabel": "SAP HCM — Employee Headcount",
+    "integrationKey": "sap-hcm.headcount.kpi-cascading",
     "uom": "%",
     "type": "Max",
     "period": "Bulanan",

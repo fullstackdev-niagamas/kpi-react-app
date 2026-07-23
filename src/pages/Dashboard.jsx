@@ -1,9 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MONTH_LABELS, ACTIVE_PLAN_YEAR, CURRENT_MONTH_IDX, AVAILABLE_YEARS, TABLE_THEMES } from '../data/mockData';
 import { useKPIContext } from '../context/KPIContext';
-import { kpiMonthStats, gradeFromTotal, gradeFromScore, scoreBg, scoreTextColor, calcYTD, computeAch, computeScore, badgeColorByPersp, levelBadge, PERSP_META, borderByGrade, bgByGrade } from '../utils/helpers';
+import { kpiMonthStats, kpiYTDStats, gradeFromTotal, gradeFromScore, scoreBg, scoreTextColor, badgeColorByPersp, levelBadge, PERSP_META, borderByGrade, bgByGrade, deptScoreAt, deptScoreYTD } from '../utils/helpers';
 import { exportDashboardExcel } from '../utils/excel';
 import { useToast } from '../context/ToastContext';
+import { TrendSparkline } from '../components/TrendSparkline';
+import { KPIDetailModal } from '../components/KPIDetailModal';
+import { FEATURES } from '../config/features';
 
 export const Dashboard = ({ currentUserName }) => {
   const { users, userKPIs } = useKPIContext();
@@ -11,6 +14,8 @@ export const Dashboard = ({ currentUserName }) => {
   const [viewMonthIdx, setViewMonthIdx] = useState(CURRENT_MONTH_IDX);
   const [viewYear, setViewYear] = useState(ACTIVE_PLAN_YEAR);
   const [tableTheme, setTableTheme] = useState('navy');
+  const [statusFilter, setStatusFilter] = useState('all'); // all | red | draft — filter cepat baris KPI
+  const [detailKpi, setDetailKpi] = useState(null); // KPI yang lagi dibuka drill-down modal-nya
   const tableRef = useRef(null);
   const toast = useToast();
 
@@ -31,36 +36,34 @@ export const Dashboard = ({ currentUserName }) => {
   // merge 2 dataset terpisah. Draft tetap ditampilkan (redup, Actual = "—") sesuai Section 10.1 brief.
   const dashKPIs = (userKPIs[currentUserName] || []).map(k => ({ ...k, planStatus: k.status, isDraftOnly: k.status === 'Draft' }));
 
-  // Monthly totals
-  const monthlyTotals = MONTH_LABELS.map((_, mi) => {
-    const scoreXWs = dashKPIs.map(k => { const st = kpiMonthStats(k, mi); return st ? st.scoreXW : null; });
-    const filled = scoreXWs.filter(val => val !== null);
-    if (!filled.length) return null;
-    return filled.reduce((a, b) => a + b, 0);
-  });
-
-  const monthlyYTDTotals = MONTH_LABELS.map((_, mi) => {
-    const hasData = dashKPIs.some(k => k.factor1[mi] !== null && k.factor1[mi] !== undefined);
-    if (!hasData) return null;
-    return dashKPIs.reduce((sum, k) => {
-      const scores = [];
-      for (let i = 0; i <= mi; i++) { const st = kpiMonthStats(k, i); if (st) scores.push(st.score); }
-      const avgScore = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
-      return sum + avgScore * k.weight;
-    }, 0);
-  });
-
-  const totalScore = dashKPIs.reduce((sum, k) => { const st = kpiMonthStats(k, v); return sum + (st ? st.scoreXW : 0); }, 0);
-  const totalGrade = gradeFromTotal(totalScore);
+  // Monthly totals — pakai deptScoreAt/deptScoreYTD (sumber bersama, sama dgn Executive/Monitoring/
+  // Reports/StrategyMap, lihat helpers.js) supaya Total Score individual TIDAK divergen dari halaman
+  // lain. KPI yg belum terisi bulan mi dikeluarkan dari kalkulasi (exclude & re-normalize thd bobot
+  // yg terisi, keputusan user 2026-07-20) — null kalau sama sekali belum ada KPI terisi bulan itu.
+  const monthlyTotals = MONTH_LABELS.map((_, mi) => deptScoreAt(dashKPIs, mi));
+  const monthlyYTDTotals = MONTH_LABELS.map((_, mi) => deptScoreYTD(dashKPIs, mi));
   // Dibulatkan 2 desimal — hindari noise floating-point (mis. 99.99999999999999) dari penjumlahan
   // fraksi weight, konsisten dgn Planning.jsx (satu-satunya sumber data yg sama, userKPIs).
   const totalWeight = Math.round(dashKPIs.reduce((s, k) => s + k.weight, 0) * 100 * 100) / 100;
 
-  // Perspective groups
+  // Perspective groups — statusFilter cuma menyaring baris yg TAMPIL (Table & Card View berbagi
+  // `groups` ini), tidak mengubah totalWeight/monthlyTotals di atas yg tetap dihitung dari semua KPI.
   const perspOrder = ['Financial', 'Customer', 'Internal Process', 'Learning & Growth'];
-  const groups = perspOrder.map(p => ({ persp: p, kpis: dashKPIs.filter(k => k.persp === p) })).filter(g => g.kpis.length);
+  const filteredKPIs = dashKPIs.filter(k => {
+    if (statusFilter === 'red') { const st = kpiMonthStats(k, v); return st && st.score <= 1; }
+    if (statusFilter === 'draft') return k.isDraftOnly || k.planStatus === 'Draft';
+    return true;
+  });
+  const groups = perspOrder.map(p => ({ persp: p, kpis: filteredKPIs.filter(k => k.persp === p) })).filter(g => g.kpis.length);
+  // Normalnya cuma s.d. bulan aktif `m` — tapi kalau ada data Actual di bulan setelahnya (mis. hasil
+  // input via QA Testing Tools di Input Realisasi, yg sengaja bisa override bulan-bulan lain utk
+  // simulasi), bulan itu ikut ditambahkan supaya Trend column & modal drill-down "link" ke data
+  // tsb, bukan diam2 disembunyikan krn cuma mengandalkan `m`. Tidak berpengaruh di kondisi produksi
+  // normal krn tidak akan ada data di bulan setelah `m` tanpa lewat QA Mode.
+  const activeMonths = MONTH_LABELS.map((_, mi) => mi)
+    .filter(mi => mi <= m || dashKPIs.some(k => k.factor1[mi] !== null && k.factor1[mi] !== undefined));
 
-  const scoreCl = ts => ts <= 1.5 ? 'bg-red-400 text-white' : ts <= 2.5 ? 'bg-amber-400 text-white' : 'bg-green-500 text-white';
+  const scoreCl = ts => ts <= 1.5 ? 'bg-red-400 text-white' : ts <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500 text-white';
 
   // ── KPI Summary Header ──
   const renderSummaryHeader = () => (
@@ -185,6 +188,16 @@ export const Dashboard = ({ currentUserName }) => {
           <button onClick={() => setDashboardView('card')} className={`px-3 py-1.5 text-xs font-medium rounded-nlg-input border ${dashboardView === 'card' ? 'bg-nlg-primary text-white border-nlg-primary' : 'bg-white text-nlg-text-muted border-nlg-border'}`}>🗂 Card</button>
         </div>
       </div>
+      <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+        <span className="text-[11px] text-nlg-text-subdued mr-1">Filter:</span>
+        <button onClick={() => setStatusFilter('all')} className={`px-2.5 py-1 text-[11px] font-medium rounded-full border ${statusFilter === 'all' ? 'bg-nlg-primary text-white border-nlg-primary' : 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-sidebar'}`}>Semua ({dashKPIs.length})</button>
+        <button onClick={() => setStatusFilter('red')} className={`px-2.5 py-1 text-[11px] font-medium rounded-full border ${statusFilter === 'red' ? 'bg-red-500 text-white border-red-500' : 'bg-white text-red-600 border-red-200 hover:bg-red-50'}`}>
+          🔴 Merah ({dashKPIs.filter(k => { const st = kpiMonthStats(k, v); return st && st.score <= 1; }).length})
+        </button>
+        <button onClick={() => setStatusFilter('draft')} className={`px-2.5 py-1 text-[11px] font-medium rounded-full border ${statusFilter === 'draft' ? 'bg-gray-600 text-white border-gray-600' : 'bg-white text-nlg-text-muted border-nlg-border hover:bg-nlg-sidebar'}`}>
+          📝 Draft ({dashKPIs.filter(k => k.isDraftOnly || k.planStatus === 'Draft').length})
+        </button>
+      </div>
       <div className="flex items-center gap-2 mb-3">
         <span className="text-[11px] text-nlg-text-subdued ml-auto">Export:</span>
         <button onClick={() => { exportDashboardExcel(userMeta, dashKPIs.filter(k => !k.isDraftOnly), viewYear); toast('Dashboard diexport ke Excel (.xlsx).'); }} className="px-3 py-1.5 text-[11px] font-medium rounded-nlg-input border border-nlg-border text-nlg-text-muted bg-white hover:bg-nlg-sidebar flex items-center gap-1.5">📥 Excel (.xlsx)</button>
@@ -198,36 +211,40 @@ export const Dashboard = ({ currentUserName }) => {
   // kartu KPI dgn border/header warna mengikuti grade (bukan lagi flat grid tanpa pengelompokan). ──
   const renderKPICard = (k) => {
     const isDraft = k.isDraftOnly || k.planStatus === 'Draft';
-    const stMTD = !isDraft ? kpiMonthStats(k, v) : null;
-    const mtdVal = stMTD ? stMTD.mtd : 0;
-    const ytdVal = isDraft ? 0 : calcYTD(k, v);
-    const achMTD = isDraft ? 0 : computeAch(k.type, k.target, mtdVal);
-    const achYTD = isDraft ? 0 : computeAch(k.type, k.target, ytdVal);
-    const scoreMTD = isDraft ? 0 : computeScore(achMTD, k.type);
-    const scoreYTD = isDraft ? 0 : computeScore(achYTD, k.type);
-    const gradeMTD = stMTD ? gradeFromScore(scoreMTD) : null;
-    const gradeYTD = stMTD ? gradeFromScore(scoreYTD) : null;
+    // Status Draft TIDAK berarti "tanpa data" — KPI yg direset ke Draft via QA Mode/Mode Simulasi
+    // (Input Realisasi) tetap membawa Factor 1/2 asli, dan Total Score (deptScoreAt/deptScoreYTD)
+    // sudah menghitung SEMUA status sejak keputusan "mirror penuh" (Team.jsx, 2026-07-21). Sebelumnya
+    // baris/card di sini malah membutakan angka begitu status Draft, walau datanya ada — bikin Total
+    // Score & tampilan per-KPI berselisih (root cause laporan user 2026-07-23, kasus Abu Tholib QA
+    // Mode). Satu2nya syarat tampil/sembunyi sekarang murni "datanya ada?" via kpiMonthStats/
+    // kpiYTDStats (null-safe) — sama seperti Team.jsx yg sudah benar di kolom MTD & Card View-nya.
+    const stMTD = kpiMonthStats(k, v);
+    const stYTD = kpiYTDStats(k, v);
+    const achMTD = stMTD ? stMTD.ach : 0;
+    const achYTD = stYTD ? stYTD.ach : 0;
+    const gradeMTD = stMTD ? gradeFromScore(stMTD.score) : null;
+    const gradeYTD = stYTD ? gradeFromScore(stYTD.score) : null;
 
     return (
       <div
         key={k.id}
-        className={`rounded-nlg-input border-2 bg-white overflow-hidden w-64 shrink-0 ${isDraft ? 'opacity-70' : ''}`}
+        className={`rounded-nlg-input border-2 bg-white overflow-hidden h-full flex flex-col cursor-pointer hover:shadow-md transition-shadow ${isDraft ? 'opacity-70' : ''}`}
         style={{ borderColor: gradeMTD ? borderByGrade(gradeMTD.label) : '#E5E7EB' }}
+        onClick={() => setDetailKpi(k)}
+        title={FEATURES.PICA_ENABLED ? 'Klik untuk lihat detail riwayat & PICA' : 'Klik untuk lihat detail riwayat'}
       >
         <div className="flex items-start justify-between gap-2 px-3 py-2" style={{ background: gradeMTD ? bgByGrade(gradeMTD.label) : '#F9FAFB' }}>
-          <span className="text-[12px] font-bold leading-snug text-nlg-text">{k.name}</span>
+          <span className="text-[12px] font-bold leading-snug text-nlg-text line-clamp-2 min-h-[2.25em]">{k.name}</span>
           <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 ${badgeColorByPersp(k.persp)}`}>{k.type}</span>
         </div>
         <div className="flex items-center justify-between px-3 py-1.5 text-[10px] text-nlg-text-subdued border-b border-nlg-border">
           <span>{k.period} · {k.uom}</span>
           <span className="font-medium text-nlg-primary">Target: {k.target}{k.uom === '%' ? '%' : ''}</span>
         </div>
-        <div className="flex divide-x divide-nlg-border">
+        <div className="flex divide-x divide-nlg-border mt-auto">
           <div className="flex-1 px-2 py-1.5 text-center">
             <div className="text-[9px] text-nlg-text-subdued mb-1">MTD</div>
-            {isDraft ? (
-              <span className="text-[10px] text-nlg-text-subdued">—</span>
-            ) : gradeMTD ? (
+            {gradeMTD ? (
               <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${gradeMTD.cls}`}>{(achMTD * 100).toFixed(0)}%</span>
             ) : (
               <span className="text-[9px] text-nlg-text-subdued italic">Belum ada data</span>
@@ -235,9 +252,7 @@ export const Dashboard = ({ currentUserName }) => {
           </div>
           <div className="flex-1 px-2 py-1.5 text-center">
             <div className="text-[9px] text-nlg-text-subdued mb-1">YTD</div>
-            {isDraft ? (
-              <span className="text-[10px] text-nlg-text-subdued">—</span>
-            ) : gradeYTD ? (
+            {gradeYTD ? (
               <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${gradeYTD.cls}`}>{(achYTD * 100).toFixed(0)}%</span>
             ) : (
               <span className="text-[9px] text-nlg-text-subdued italic">Belum ada data</span>
@@ -260,7 +275,10 @@ export const Dashboard = ({ currentUserName }) => {
                 <div className="text-[11px] font-bold leading-tight">{g.persp}</div>
                 <div className="text-[9px] opacity-75">Perspective</div>
               </div>
-              <div className="flex-1 flex flex-wrap gap-3 items-start p-3 rounded-nlg-card border" style={{ borderColor: meta.border, background: meta.light }}>
+              <div
+                className="flex-1 grid gap-3 p-3 rounded-nlg-card border items-stretch"
+                style={{ borderColor: meta.border, background: meta.light, gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}
+              >
                 {g.kpis.map(k => renderKPICard(k))}
               </div>
             </div>
@@ -281,36 +299,40 @@ export const Dashboard = ({ currentUserName }) => {
 
   // ── BSC Table View ──
   const renderTableView = () => {
-    const activeMonths = MONTH_LABELS.map((_, mi) => mi).filter(mi => mi <= m);
+    // Bulan aktif SELAIN yang sedang dilihat (v) diringkas jadi satu kolom Trend (sparkline), bukan
+    // masing-masing 3-kolom penuh — mencegah tabel melebar N-bulan x 3-kolom spt hasil export Excel.
+    const trendMonths = activeMonths.filter(mi => mi !== v);
+    const trendLabel = trendMonths.length > 1
+      ? `${MONTH_LABELS[trendMonths[0]]}–${MONTH_LABELS[trendMonths[trendMonths.length - 1]]}`
+      : trendMonths.length === 1 ? MONTH_LABELS[trendMonths[0]] : '';
 
     return (
       <div className="overflow-x-auto rounded-nlg-card border border-nlg-border" ref={tableRef}>
-        <table className="border-collapse min-w-full bg-white text-[11px]">
+        <table className="border-collapse min-w-full bg-white text-[11px] tbl-zebra tbl-clean">
           <thead className="sticky top-0 z-10">
             <tr className="th1 text-white text-[10px]">
               <th rowSpan={2} className="sticky left-0 z-20 th1 px-2 py-2 text-left min-w-[90px] border tbdr align-middle">Perspective</th>
               {showSO && <th rowSpan={2} className="sticky left-[90px] z-20 th1 px-2 py-2 text-left min-w-[110px] border tbdr align-middle">Strategic Objective</th>}
-              <th rowSpan={2} className={`${showSO ? 'sticky left-[200px]' : 'sticky left-[90px]'} z-20 th1 px-2 py-2 text-left min-w-[140px] border tbdr align-middle`}>KPI</th>
+              <th rowSpan={2} className={`${showSO ? 'sticky left-[200px]' : 'sticky left-[90px]'} sticky-shadow z-20 th1 px-2 py-2 text-left min-w-[140px] border tbdr align-middle`}>KPI</th>
               <th rowSpan={2} className="th1 px-2 py-2 text-center min-w-[42px] border tbdr align-middle">Type</th>
               <th rowSpan={2} className="th1 px-2 py-2 text-center min-w-[36px] border tbdr align-middle">UoM</th>
               <th rowSpan={2} className="th1 px-2 py-2 text-center min-w-[68px] border tbdr align-middle">Periode</th>
               <th rowSpan={2} className="th1 px-2 py-2 text-center min-w-[46px] border tbdr align-middle">Weight</th>
               <th rowSpan={2} className="th1 px-2 py-2 text-center min-w-[52px] border tbdr align-middle">Target</th>
-              {activeMonths.map(mi => (
-                <th key={mi} colSpan={3} className={`${mi === v ? 'bg-nlg-primary' : 'tpast'} px-2 py-2 text-center border tbdr`}>
-                  {MONTH_LABELS[mi]}-{String(viewYear).slice(2)}{mi === m ? ' 🔒' : ''}
+              {trendMonths.length > 0 && (
+                <th rowSpan={2} className="tpast px-2 py-2 text-center border tbdr min-w-[70px] align-middle" title="Tren Score bulan lain (selain bulan yang ditampilkan)">
+                  Trend {trendLabel}
                 </th>
-              ))}
+              )}
+              <th colSpan={3} className="bg-nlg-primary px-2 py-2 text-center border tbdr">
+                {MONTH_LABELS[v]}-{String(viewYear).slice(2)}{v === m ? ' 🔒' : ''}
+              </th>
               <th colSpan={2} className="tytd px-2 py-2 text-center border tbdr">YTD (Jan–{MONTH_LABELS[v]}, {viewYear})</th>
             </tr>
             <tr className="th2 text-white text-[10px]">
-              {activeMonths.map(mi => (
-                <React.Fragment key={mi}>
-                  <th className="px-1 py-1 text-center border tbdr min-w-[46px]">Actual</th>
-                  <th className="px-1 py-1 text-center border tbdr min-w-[52px]">Ach%</th>
-                  <th className="px-1 py-1 text-center border tbdr min-w-[36px]">Score</th>
-                </React.Fragment>
-              ))}
+              <th className="px-1 py-1 text-center border tbdr min-w-[46px]">Actual</th>
+              <th className="px-1 py-1 text-center border tbdr min-w-[52px]">Ach%</th>
+              <th className="px-1 py-1 text-center border tbdr min-w-[36px]">Score</th>
               <th className="px-1 py-1 text-center border tbdr min-w-[52px] tytd">Ach% YTD</th>
               <th className="px-1 py-1 text-center border tbdr min-w-[36px] tytd">Score YTD</th>
             </tr>
@@ -320,23 +342,34 @@ export const Dashboard = ({ currentUserName }) => {
               const perspWeight = (g.kpis.reduce((s, k) => s + k.weight, 0) * 100).toFixed(0);
               return g.kpis.map((k, ki) => {
                 const isDraft = k.isDraftOnly || k.planStatus === 'Draft';
-                const ytdAch = !isDraft ? calcYTD(k, v) : 0;
-                const ytdAchv = !isDraft ? (k.type === 'Min' ? (2 * k.target - ytdAch) / k.target : ytdAch / k.target) : 0;
-                const ytdScore = !isDraft ? computeScore(ytdAchv, k.type) : 0;
+                // Null-safe (root cause bug 2026-07-22): `kpiYTDStats` return null kalau KPI belum
+                // pernah punya Actual sama sekali — dipakai bareng guard `stYTD` di sel tabel bawah,
+                // bukan `calcYTD` mentah yg diam2 menghasilkan 0%/200% utk KPI kosong.
+                // TIDAK lagi digating `!isDraft` (root cause bug 2026-07-23) — lihat catatan di
+                // `renderKPICard` atas: status Draft (mis. dari QA Mode) tidak berarti tanpa data.
+                const stYTD = kpiYTDStats(k, v);
                 const kpiNameLeft = showSO ? 'sticky left-[200px]' : 'sticky left-[90px]';
 
                 return (
                   <tr key={k.id} className={`hover:bg-nlg-sidebar/40 ${isDraft ? 'opacity-75 bg-gray-50/50' : ''}`}>
                     {ki === 0 && (
-                      <td className="sticky left-0 z-10 bg-nlg-rail px-2 py-1.5 font-bold text-[11px] border border-nlg-border text-nlg-text align-top" rowSpan={g.kpis.length}>
+                      <td
+                        className="sticky left-0 z-10 px-2 py-1.5 font-bold text-[11px] border border-nlg-border align-top"
+                        style={{ background: PERSP_META[g.persp].light, borderLeft: `4px solid ${PERSP_META[g.persp].color}`, color: PERSP_META[g.persp].textColor }}
+                        rowSpan={g.kpis.length}
+                      >
                         <div>{g.persp}</div>
-                        <div className="text-[10px] text-nlg-text-muted font-normal">{perspWeight}%</div>
+                        <div className="text-[10px] font-normal opacity-70">{perspWeight}%</div>
                       </td>
                     )}
                     {showSO && (
                       <td className="sticky left-[90px] bg-white px-2 py-1.5 text-[10px] border border-nlg-border text-nlg-text-subdued">{k.so || '—'}</td>
                     )}
-                    <td className={`${kpiNameLeft} bg-white px-2 py-1.5 text-[11px] font-medium border border-nlg-border`}>
+                    <td
+                      className={`${kpiNameLeft} sticky-shadow bg-white px-2 py-1.5 text-[11px] font-medium border border-nlg-border cursor-pointer hover:text-nlg-primary hover:underline`}
+                      onClick={() => setDetailKpi(k)}
+                      title={FEATURES.PICA_ENABLED ? 'Klik untuk lihat detail riwayat & PICA' : 'Klik untuk lihat detail riwayat'}
+                    >
                       {k.name}
                       {isDraft && <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-gray-100 text-nlg-text-subdued">{k.planStatus}</span>}
                     </td>
@@ -345,32 +378,63 @@ export const Dashboard = ({ currentUserName }) => {
                     <td className="px-1 py-1.5 text-center text-[10px] border border-nlg-border text-nlg-text-muted">{k.period}</td>
                     <td className="px-1 py-1.5 text-center text-[10px] border border-nlg-border font-medium">{(k.weight * 100).toFixed(0)}%</td>
                     <td className="px-1 py-1.5 text-center text-[10px] border border-nlg-border font-medium text-nlg-primary">{k.target}{k.uom === '%' ? '%' : ''}</td>
-                    {activeMonths.map(mi => {
-                      const st = kpiMonthStats(k, mi);
-                      if (!st || isDraft) return (
-                        <React.Fragment key={mi}>
+                    {trendMonths.length > 0 && (
+                      <td className="px-1 py-1 text-center border border-nlg-border align-middle">
+                        <TrendSparkline
+                          points={trendMonths.map(mi => {
+                            const st = kpiMonthStats(k, mi);
+                            return {
+                              mi,
+                              value: st ? st.score : null,
+                              tooltip: st ? `${MONTH_LABELS[mi]} ${viewYear} — Actual ${st.mtd.toFixed(1)}${k.uom === '%' ? '%' : ''} · Ach ${(st.ach * 100).toFixed(1)}% · Score ${st.score}` : `${MONTH_LABELS[mi]} ${viewYear} — belum ada data`,
+                            };
+                          })}
+                          onSelectMonth={setViewMonthIdx}
+                        />
+                      </td>
+                    )}
+                    {(() => {
+                      const st = kpiMonthStats(k, v);
+                      if (!st) return (
+                        <>
                           <td className="px-1 py-1 text-center border border-nlg-border text-nlg-text-subdued text-[10px]">—</td>
                           <td className="px-1 py-1 text-center border border-nlg-border text-nlg-text-subdued text-[10px]">—</td>
                           <td className="px-1 py-1 text-center border border-nlg-border text-nlg-text-subdued">—</td>
-                        </React.Fragment>
+                        </>
                       );
+                      const achPct = Math.min(100, Math.max(0, st.ach * 100));
+                      const barColor = st.score <= 1 ? '#EF4444' : st.score <= 2 ? '#FACC15' : '#22C55E';
                       return (
-                        <React.Fragment key={mi}>
+                        <>
                           <td className="px-1 py-1 text-center border border-nlg-border text-[10px]">{st.mtd.toFixed(1)}{k.uom === '%' ? '%' : ''}</td>
-                          <td className={`px-1 py-1 text-center border border-nlg-border text-[10px] ${scoreTextColor(st.score)}`}>{(st.ach * 100).toFixed(1)}%</td>
-                          <td className={`px-1 py-1 text-center border border-nlg-border font-bold text-[11px] ${scoreBg(st.score)}`}>{st.score}</td>
-                        </React.Fragment>
+                          <td className="px-1 py-1.5 text-center border border-nlg-border">
+                            <div className={`text-[10px] ${scoreTextColor(st.score)}`}>{(st.ach * 100).toFixed(1)}%</div>
+                            <div className="h-[3px] mt-1 rounded-full bg-gray-100 overflow-hidden">
+                              <div className="h-full rounded-full" style={{ width: `${achPct}%`, background: barColor }} />
+                            </div>
+                          </td>
+                          <td className="px-1 py-1 text-center border border-nlg-border">
+                            <span className={`inline-flex items-center justify-center w-6 h-5 rounded-full font-bold text-[11px] ${scoreBg(st.score)}`}>{st.score}</span>
+                          </td>
+                        </>
                       );
-                    })}
-                    {isDraft ? (
+                    })()}
+                    {!stYTD ? (
                       <>
                         <td className="px-1 py-1.5 text-center border border-nlg-border text-nlg-text-subdued text-[10px]">—</td>
                         <td className="px-1 py-1.5 text-center border border-nlg-border text-nlg-text-subdued text-[10px]">—</td>
                       </>
                     ) : (
                       <>
-                        <td className={`px-1 py-1.5 text-center border border-nlg-border text-[10px] ${scoreTextColor(ytdScore)}`}>{(ytdAchv * 100).toFixed(1)}%</td>
-                        <td className={`px-1 py-1.5 text-center border border-nlg-border font-bold text-[11px] ${scoreBg(ytdScore)}`}>{ytdScore}</td>
+                        <td className="px-1 py-1.5 text-center border border-nlg-border">
+                          <div className={`text-[10px] ${scoreTextColor(stYTD.score)}`}>{(stYTD.ach * 100).toFixed(1)}%</div>
+                          <div className="h-[3px] mt-1 rounded-full bg-gray-100 overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, stYTD.ach * 100))}%`, background: stYTD.score <= 1 ? '#EF4444' : stYTD.score <= 2 ? '#FACC15' : '#22C55E' }} />
+                          </div>
+                        </td>
+                        <td className="px-1 py-1.5 text-center border border-nlg-border">
+                          <span className={`inline-flex items-center justify-center w-6 h-5 rounded-full font-bold text-[11px] ${scoreBg(stYTD.score)}`}>{stYTD.score}</span>
+                        </td>
                       </>
                     )}
                   </tr>
@@ -383,34 +447,43 @@ export const Dashboard = ({ currentUserName }) => {
               <td className="border tbdr"></td><td className="border tbdr"></td><td className="border tbdr"></td>
               <td className="text-center text-[10px] font-medium border tbdr">{totalWeight.toFixed(0)}%</td>
               <td className="border tbdr"></td>
-              {MONTH_LABELS.map((_, mi) => mi).filter(mi => mi <= m).map(mi => {
-                const ts = dashKPIs.reduce((s, k) => { const st = kpiMonthStats(k, mi); return s + (st ? st.scoreXW : 0); }, 0);
-                const tg = gradeFromTotal(ts);
-                const cl = ts <= 1.5 ? 'bg-red-500' : ts <= 2.5 ? 'bg-amber-400' : 'bg-green-500';
-                const ring = mi === v ? 'ring-2 ring-inset ring-white/40' : '';
-                return (
-                  <React.Fragment key={mi}>
-                    <td colSpan={2} className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">Total Score:</td>
-                    <td className={`px-2 py-2 text-center font-bold text-[12px] border tbdr ${cl} ${ring}`}>
-                      {ts.toFixed(2)}<br /><span className="text-[10px]">{tg.label}</span>
-                    </td>
-                  </React.Fragment>
-                );
-              })}
+              {trendMonths.length > 0 && (
+                <td className="border tbdr text-center align-middle">
+                  <TrendSparkline
+                    points={trendMonths.map(mi => ({
+                      mi,
+                      value: monthlyTotals[mi],
+                      tooltip: monthlyTotals[mi] !== null ? `${MONTH_LABELS[mi]} ${viewYear} — Total Score ${monthlyTotals[mi].toFixed(2)}` : `${MONTH_LABELS[mi]} ${viewYear} — belum ada data`,
+                    }))}
+                    onSelectMonth={setViewMonthIdx}
+                  />
+                </td>
+              )}
+              {/* `ts`/`ytdTs` = monthlyTotals[v]/monthlyYTDTotals[v] — dipakai ulang, BUKAN dihitung
+                  lagi terpisah di sini (sumber ganda yg tadinya sama2 lupa exclude bobot KPI kosong,
+                  ditemukan dari laporan user 2026-07-20 — sekarang satu sumber lewat deptScoreAt). */}
               {(() => {
-                const ytdTs = dashKPIs.reduce((sum, k) => {
-                  const scores = [];
-                  for (let i = 0; i <= v; i++) { const st = kpiMonthStats(k, i); if (st) scores.push(st.score); }
-                  const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
-                  return sum + avg * k.weight;
-                }, 0);
+                const ts = monthlyTotals[v];
+                const tg = gradeFromTotal(ts);
+                const cl = ts === null ? 'bg-gray-300' : ts <= 1.5 ? 'bg-red-500' : ts <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500';
+                return (
+                  <>
+                    <td colSpan={2} className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">Total Score {MONTH_LABELS[v]}:</td>
+                    <td className={`px-2 py-2 text-center font-bold text-[12px] border tbdr ${cl}`}>
+                      {ts !== null ? ts.toFixed(2) : '—'}<br /><span className="text-[10px]">{tg.label}</span>
+                    </td>
+                  </>
+                );
+              })()}
+              {(() => {
+                const ytdTs = monthlyYTDTotals[v];
                 const ytdGr = gradeFromTotal(ytdTs);
-                const ytdCl = ytdTs <= 1.5 ? 'bg-red-500' : ytdTs <= 2.5 ? 'bg-amber-400' : 'bg-green-500';
+                const ytdCl = ytdTs === null ? 'bg-gray-300' : ytdTs <= 1.5 ? 'bg-red-500' : ytdTs <= 2.5 ? 'bg-yellow-400 text-black' : 'bg-green-500';
                 return (
                   <>
                     <td className="px-2 py-1.5 text-right text-[10px] font-semibold border tbdr">YTD:</td>
                     <td className={`px-2 py-2 text-center font-bold text-[12px] border tbdr ${ytdCl}`}>
-                      {ytdTs.toFixed(2)}<br /><span className="text-[10px]">{ytdGr.label}</span>
+                      {ytdTs !== null ? ytdTs.toFixed(2) : '—'}<br /><span className="text-[10px]">{ytdGr.label}</span>
                     </td>
                   </>
                 );
@@ -447,7 +520,14 @@ export const Dashboard = ({ currentUserName }) => {
       {renderSummaryHeader()}
       {renderSummaryBar()}
       {renderToggle()}
-      {dashboardView === 'card' ? renderCardView() : renderTableView()}
+      {groups.length === 0 ? (
+        <div className="border border-nlg-border rounded-nlg-card p-8 text-center text-[12px] text-nlg-text-subdued">
+          Tidak ada KPI yang cocok dengan filter ini. <button onClick={() => setStatusFilter('all')} className="text-nlg-primary hover:underline font-medium">Reset filter</button>
+        </div>
+      ) : (
+        dashboardView === 'card' ? renderCardView() : renderTableView()
+      )}
+      <KPIDetailModal kpi={detailKpi} activeMonths={activeMonths} year={viewYear} viewMonthIdx={v} onClose={() => setDetailKpi(null)} />
     </div>
   );
 };

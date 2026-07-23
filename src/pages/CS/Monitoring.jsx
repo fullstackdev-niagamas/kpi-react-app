@@ -36,7 +36,10 @@ export const Monitoring = () => {
   const approved = depts.reduce((s, d) => s + d.approved, 0);
   const pending = depts.reduce((s, d) => s + d.pending, 0);
   const submitRate = submitted ? Math.round((approved / submitted) * 100) : 0;
-  const companyScore = totalDept ? depts.reduce((s, d) => s + d.score, 0) / totalDept : 0;
+  // Dept dgn score null (belum ada KPI terisi bulan ini) dikeluarkan dari rata2 company, bukan
+  // dianggap 0 — konsisten dgn prinsip exclude & re-normalize di deptScoreAt sendiri.
+  const scoredDepts = depts.filter(d => d.score !== null);
+  const companyScore = scoredDepts.length ? scoredDepts.reduce((s, d) => s + d.score, 0) / scoredDepts.length : null;
   const companyGrade = gradeFromTotal(companyScore);
   const totalRed = depts.reduce((s, d) => s + redCount(d.kpis, viewMonth), 0);
   const allRed = depts.flatMap(d => d.kpis.filter(k => { const st = kpiMonthStats(k, viewMonth); return st && st.score <= 1; }).map(k => ({ ...k, dept: d.dept })));
@@ -50,7 +53,7 @@ export const Monitoring = () => {
         <h1 className="text-xl font-bold text-nlg-text mb-1">Monitoring — {selectedDept}</h1>
         <button onClick={() => setSelectedDept(null)} className="text-sm text-nlg-primary hover:underline mb-4 inline-block">← Kembali ke ringkasan</button>
         <div className="grid grid-cols-4 gap-4 mb-6">
-          <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Score ({MONTH_LABELS[viewMonth]})</div><div className={`text-2xl font-bold ${dept.score >= 2.5 ? 'text-green-600' : dept.score >= 1.5 ? 'text-amber-500' : 'text-red-600'}`}>{dept.score.toFixed(2)}</div></div>
+          <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Score ({MONTH_LABELS[viewMonth]})</div><div className={`text-2xl font-bold ${dept.score === null ? 'text-nlg-text-subdued' : dept.score >= 2.5 ? 'text-green-600' : dept.score >= 1.5 ? 'text-yellow-600' : 'text-red-600'}`}>{dept.score !== null ? dept.score.toFixed(2) : '—'}</div></div>
           <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Submitted</div><div className="text-2xl font-bold text-nlg-primary">{dept.submitted}</div></div>
           <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Approved</div><div className="text-2xl font-bold text-green-600">{dept.approved}</div></div>
           <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Pending</div><div className="text-2xl font-bold text-amber-500">{dept.pending}</div></div>
@@ -112,7 +115,7 @@ export const Monitoring = () => {
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <div className="border border-nlg-border rounded-nlg-card bg-[#172B4D] text-white p-4">
           <div className="text-[10px] font-semibold text-white/70 uppercase mb-1">Total Score Company</div>
-          <div className="text-2xl font-bold">{companyScore.toFixed(2)}</div>
+          <div className="text-2xl font-bold">{companyScore !== null ? companyScore.toFixed(2) : '—'}</div>
           <span className={`mt-1 inline-block text-[10px] px-1.5 py-0.5 rounded-full ${companyGrade.cls}`}>{companyGrade.text}</span>
         </div>
         <div className="border border-nlg-border rounded-nlg-card bg-white p-4"><div className="text-[10px] font-semibold text-nlg-text-subdued uppercase mb-1">Submit Rate</div><div className="text-2xl font-bold text-green-600">{submitRate}%</div></div>
@@ -148,12 +151,12 @@ export const Monitoring = () => {
               return (
                 <tr key={i} className="hover:bg-nlg-sidebar/40">
                   <td className="px-4 py-3 font-medium text-nlg-text cursor-pointer hover:text-nlg-primary" onClick={() => setSelectedDept(d.dept)}>{d.dept}</td>
-                  <td className="px-4 py-3 text-center"><span className={`inline-block px-2.5 py-1 text-[11px] font-bold rounded-full ${g.cls}`}>{d.score.toFixed(2)} {g.label}</span></td>
+                  <td className="px-4 py-3 text-center"><span className={`inline-block px-2.5 py-1 text-[11px] font-bold rounded-full ${g.cls}`}>{d.score !== null ? d.score.toFixed(2) : '—'} {g.label}</span></td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <div className="flex h-3 w-32 rounded-full overflow-hidden bg-nlg-sidebar">
                         <div className="bg-green-500" style={{ width: `${(dist.B / totalK) * 100}%` }}></div>
-                        <div className="bg-amber-400" style={{ width: `${(dist.C / totalK) * 100}%` }}></div>
+                        <div className="bg-yellow-400" style={{ width: `${(dist.C / totalK) * 100}%` }}></div>
                         <div className="bg-red-500" style={{ width: `${(dist.K / totalK) * 100}%` }}></div>
                       </div>
                       <span className="text-[10px] text-nlg-text-muted">{dist.B}/{dist.C}/{dist.K}</span>
@@ -220,7 +223,7 @@ export const Monitoring = () => {
                 <tr key={i} className="hover:bg-nlg-sidebar/40">
                   <td className="px-4 py-3 font-medium">{d.dept}</td>
                   <td className="px-4 py-3 text-center">{d.kpis.length}</td>
-                  <td className="px-4 py-3 text-center"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{d.score.toFixed(2)}</span></td>
+                  <td className="px-4 py-3 text-center"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${g.cls}`}>{d.score !== null ? d.score.toFixed(2) : '—'}</span></td>
                   <td className="px-4 py-3 text-center">{reds > 0 ? <span className="text-red-600 font-bold">{reds}</span> : '0'}</td>
                   <td className="px-4 py-3 text-center"><span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${d.pending > 0 ? 'bg-nlg-primary-tint text-nlg-primary' : 'bg-green-100 text-green-700'}`}>{d.pending > 0 ? 'Pending' : 'Approved'}</span></td>
                 </tr>
